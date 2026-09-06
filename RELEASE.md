@@ -2,6 +2,11 @@
 
 ## Version History
 
+### [0.6.3] - Upcoming
+
+**Fixed:**
+- **Hide empty Solar Strings card** — the Console now hides the whole Solar Strings card when no string data is reported instead of showing a "No string data available" placeholder; Alerts and System Health then share the row evenly, the card reappears automatically if strings show up later, and fetch errors stay visible.
+
 ### [0.6.2] - 2026-09-05
 
 **Added:**
