@@ -1248,6 +1248,18 @@
                 grid-template-columns: 1fr;
             }
         }
+
+        /* When Solar Strings is hidden, Alerts + System Health share the row.
+           Desktop only: at 900px and below every card spans the full width.
+           NOTE: do not reuse the .no-strings class name here — that rule
+           styles the empty placeholder (centered, muted, padded) and would
+           leak into the whole grid via inheritance. */
+        @media (min-width: 901px) {
+            .dashboard-grid.strings-hidden .alerts-card,
+            .dashboard-grid.strings-hidden .health-card {
+                grid-column: span 6;
+            }
+        }
         
         /* Loading skeleton */
         .skeleton {
@@ -1346,7 +1358,7 @@
             <span class="last-update">Last update: <span id="last-update-time">--</span></span>
         </div>
         
-        <div class="dashboard-grid">
+        <div class="dashboard-grid strings-hidden">
             <!-- Power Flow Animation -->
             <div class="card power-flow-card">
                 <div class="card-header">
@@ -1473,8 +1485,8 @@
                 </div>
             </div>
             
-            <!-- Solar Strings -->
-            <div class="card strings-card">
+            <!-- Solar Strings (hidden until string data arrives) -->
+            <div class="card strings-card" id="strings-card" style="display:none">
                 <div class="card-header">
                     <div class="card-title">
                         <span class="icon">
@@ -2005,9 +2017,13 @@
             }
         }
 
-        // Render solar-string data → HTML string (reused for both single and per-gateway sections)
+        // Render solar-string data → { html, count } (reused for both single and
+        // per-gateway sections). The count drives card visibility: the card
+        // hides exactly when it would otherwise only show the "no data"
+        // placeholder (single source of truth).
         function formatStrings(strings) {
-            if (!strings || !Object.keys(strings).length) return '<div class="no-strings">No string data available</div>';
+            const emptyHtml = '<div class="no-strings">No string data available</div>';
+            if (!strings || !Object.keys(strings).length) return { html: emptyHtml, count: 0 };
             const sunIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>`;
             const moonIcon = `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`;
             let html = '', count = 0;
@@ -2026,19 +2042,24 @@
                             <span class="string-value power">${typeof power === 'number' ? power.toFixed(0) : power}W</span>
                         </div>`;
             }
-            return count ? html : '<div class="no-strings">No string data available</div>';
+            return count ? { html, count } : { html: emptyHtml, count: 0 };
         }
 
         // Fetch solar strings
         async function loadStrings() {
             const container = document.getElementById('string-list');
+            const card = container?.closest('.strings-card');
+            const grid = container?.closest('.dashboard-grid');
             const isMulti = Object.keys(gatewayMeta).length > 1;
             try {
+                let hasData = false;
                 if (!isMulti) {
                     // Single gateway — legacy endpoint unchanged
                     const response = await fetch('/strings');
                     if (!response.ok) throw new Error('Failed to load strings');
-                    container.innerHTML = formatStrings(await response.json());
+                    const part = formatStrings(await response.json());
+                    hasData = part.count > 0;
+                    container.innerHTML = part.html;
                 } else {
                     // Multi-gateway — per-gateway labeled sections
                     const response = await fetch('/api/aggregate/strings');
@@ -2046,14 +2067,24 @@
                     const byGateway = await response.json();
                     let html = '';
                     for (const [gwId, strings] of Object.entries(byGateway)) {
+                        const part = formatStrings(strings);
+                        if (part.count > 0) hasData = true;
                         html += `<div class="gateway-section-header">${gatewayMeta[gwId]?.name || gwId}</div>`;
-                        html += formatStrings(strings);
+                        html += part.html;
                     }
                     container.innerHTML = html || '<div class="no-strings">No string data available</div>';
                 }
+                // Hide the whole card when there is simply nothing to show;
+                // re-show on later refreshes if strings appear. The grid class
+                // lets Alerts + System Health fill the row meanwhile.
+                if (card) card.style.display = hasData ? '' : 'none';
+                if (grid) grid.classList.toggle('strings-hidden', !hasData);
             } catch (e) {
                 console.log('Strings not available:', e.message);
                 container.innerHTML = '<div class="no-strings">String data not available</div>';
+                // Keep fetch errors visible — they signal a problem, not missing hardware.
+                if (card) card.style.display = '';
+                if (grid) grid.classList.remove('strings-hidden');
             }
         }
 
