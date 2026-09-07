@@ -2,10 +2,16 @@
 
 ## Version History
 
-### [0.6.3] - Upcoming
+### [0.6.4] - Upcoming
 
 **Fixed:**
 - **Hide empty Solar Strings card** — the Console now hides the whole Solar Strings card when no string data is reported instead of showing a "No string data available" placeholder; Alerts and System Health then share the row evenly, the card reappears automatically if strings show up later, and fetch errors stay visible.
+
+### [0.6.3] - 2026-09-06
+
+**Added:**
+- **Powerwall 3 expansion packs shown under their leader** — the Console's Powerwall Status table now nests PW3 battery expansions beneath their leader unit (indented `↳` row, model shown as `Powerwall 3 (Expansion)`) instead of listing them as separate Powerwalls. The leader/expansion relationship comes from the cached TEDAPI config and is exposed in `/pod` as `PW{n}_attached_to` (e.g. `"PW1"`) plus `PW{n}_PackageSerialNumber`. Works in both single- and multi-gateway views. (#98)
+- **MQTT battery capacity and charge topics** — the MQTT publisher now emits `{prefix}/{gw}/total_capacity` and `{prefix}/{gw}/current_charge` (whole-system Wh, from cached `system_status`; falls back to summing `battery_blocks` when the top-level totals are absent), includes both in the `status` summary JSON, and adds matching Home Assistant auto-discovery sensors (`device_class: energy_storage`). The mqtt-tools monitor GUI shows the new Capacity/Charge values. (#97)
 
 ### [0.6.2] - 2026-09-05
 
