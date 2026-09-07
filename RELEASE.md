@@ -2,7 +2,7 @@
 
 ## Version History
 
-### [0.6.4] - Upcoming
+### [0.6.4] - 2026-09-07
 
 **Added:**
 - **Faster initial dashboard load** — the Console now polls alerts, strings, stats, and the other secondary endpoints every 3 seconds until every gateway completes its first successful poll, then settles into the standard 30-second cycle (30-second failsafe so an offline gateway can't keep the fast cadence running). All these endpoints are served from the server's poll cache, so this adds no traffic to the Powerwall gateway itself. (#102)
