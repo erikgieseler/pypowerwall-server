@@ -2,7 +2,7 @@
 
 ## Version History
 
-### [0.6.3] - Upcoming
+### [0.6.3] - 2026-09-06
 
 **Added:**
 - **Powerwall 3 expansion packs shown under their leader** — the Console's Powerwall Status table now nests PW3 battery expansions beneath their leader unit (indented `↳` row, model shown as `Powerwall 3 (Expansion)`) instead of listing them as separate Powerwalls. The leader/expansion relationship comes from the cached TEDAPI config and is exposed in `/pod` as `PW{n}_attached_to` (e.g. `"PW1"`) plus `PW{n}_PackageSerialNumber`. Works in both single- and multi-gateway views. (#98)
