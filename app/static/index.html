@@ -806,6 +806,42 @@
         .control-remember input {
             accent-color: var(--accent-green);
         }
+        .control-toggle {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .control-toggle input {
+            width: 44px;
+            height: 24px;
+            appearance: none;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 999px;
+            position: relative;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .control-toggle input::after {
+            content: "";
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: var(--text-secondary);
+            transition: transform 0.15s ease, background 0.15s ease;
+        }
+        .control-toggle input:checked {
+            background: rgba(63,185,80,0.25);
+            border-color: var(--accent-green);
+        }
+        .control-toggle input:checked::after {
+            transform: translateX(20px);
+            background: var(--accent-green);
+        }
         .control-btn {
             background: transparent;
             color: var(--text-secondary);
@@ -1614,6 +1650,19 @@
                             <input type="number" id="control-reserve-number" min="0" max="100" step="1" value="20" aria-label="Backup reserve percent value">
                         </div>
                         <div class="control-hint">Now: <span id="control-current-reserve" class="control-reserve-value">--</span></div>
+                    </div>
+                    <div class="control-field" id="control-grid-charging-field">
+                        <div class="control-label">Grid Charging</div>
+                        <label class="control-toggle"><span class="control-hint">Now: <span id="control-current-grid-charging">--</span></span><input type="checkbox" id="control-grid-charging" aria-label="Grid charging"></label>
+                    </div>
+                    <div class="control-field" id="control-grid-export-field">
+                        <div class="control-label">Grid Export</div>
+                        <select id="control-grid-export">
+                            <option value="battery_ok">Battery OK</option>
+                            <option value="pv_only">Solar only</option>
+                            <option value="never">Never</option>
+                        </select>
+                        <div class="control-hint">Now: <span id="control-current-grid-export">--</span></div>
                     </div>
                     <div class="control-field">
                         <div class="control-label">Token</div>
@@ -3206,8 +3255,8 @@
         const CONTROL_EYE_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
         const CONTROL_EYE_CLOSED = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
         let controlEnabled = false;
-        let controlInitial = { mode: null, reserve: null };
-        let controlTouched = { mode: false, reserve: false };
+        let controlInitial = { mode: null, reserve: null, grid_charging: null, grid_export: null };
+        let controlTouched = { mode: false, reserve: false, grid_charging: false, grid_export: false };
         let controlDirty = false;
         let controlSaving = false;
 
@@ -3264,13 +3313,21 @@
         function controlChanges() {
             const modeVal = document.getElementById('control-mode')?.value;
             const reserveVal = parseInt(document.getElementById('control-reserve-number')?.value, 10);
+            const gcVal = document.getElementById('control-grid-charging')?.checked || false;
+            const geVal = document.getElementById('control-grid-export')?.value;
             const mChanged = controlInitial.mode === null
                 ? controlTouched.mode
                 : modeVal !== controlInitial.mode;
             const rChanged = controlInitial.reserve === null
                 ? controlTouched.reserve
                 : reserveVal !== controlInitial.reserve;
-            return { modeVal, reserveVal, mChanged, rChanged };
+            const gcChanged = controlInitial.grid_charging === null
+                ? controlTouched.grid_charging
+                : gcVal !== controlInitial.grid_charging;
+            const geChanged = controlInitial.grid_export === null
+                ? controlTouched.grid_export
+                : geVal !== controlInitial.grid_export;
+            return { modeVal, reserveVal, gcVal, geVal, mChanged, rChanged, gcChanged, geChanged };
         }
 
         function updateReserve0Warning() {
@@ -3288,16 +3345,22 @@
 
         async function loadControlStatus() {
             const card = document.getElementById('control-card');
+            let gridAvailable = true;
             try {
                 const resp = await fetch('/control/status');
                 if (!resp.ok) throw new Error('status ' + resp.status);
                 const data = await resp.json();
                 controlEnabled = data.enabled === true;
+                gridAvailable = data.grid_available !== false;
             } catch (e) {
                 console.log('Control status not available:', e.message);
                 controlEnabled = false;
             }
             if (card) card.style.display = controlEnabled ? '' : 'none';
+            const gcField = document.getElementById('control-grid-charging-field');
+            const geField = document.getElementById('control-grid-export-field');
+            if (gcField) gcField.style.display = gridAvailable ? '' : 'none';
+            if (geField) geField.style.display = gridAvailable ? '' : 'none';
             if (controlEnabled) {
                 await loadControlValues(false);
             }
@@ -3312,6 +3375,8 @@
                 const mode = op.real_mode || null;
                 const reserve = (op.backup_reserve_percent !== null && op.backup_reserve_percent !== undefined)
                     ? Math.round(Number(op.backup_reserve_percent)) : null;
+                const gridCharging = (op.grid_charging !== undefined && op.grid_charging !== null) ? !!op.grid_charging : null;
+                const gridExport = op.grid_export || null;
                 const stale = !!op.stale;
 
                 const modeMap = {
@@ -3319,10 +3384,15 @@
                     'backup': 'Backup',
                     'autonomous': 'Time-Based',
                 };
+                const exportMap = { 'battery_ok': 'Battery OK', 'pv_only': 'Solar only', 'never': 'Never' };
                 document.getElementById('control-current-mode').textContent =
                     (modeMap[mode] || mode || '--') + (stale && mode ? ' (stale)' : '');
                 document.getElementById('control-current-reserve').textContent =
                     (reserve !== null ? reserve + '%' : '--') + (stale && reserve !== null ? ' (stale)' : '');
+                const gcEl = document.getElementById('control-current-grid-charging');
+                if (gcEl) gcEl.textContent = (gridCharging === null ? '--' : (gridCharging ? 'Enabled' : 'Disabled')) + (stale && gridCharging !== null ? ' (stale)' : '');
+                const geEl = document.getElementById('control-current-grid-export');
+                if (geEl) geEl.textContent = ((exportMap[gridExport] || gridExport || '--')) + (stale && gridExport ? ' (stale)' : '');
 
                 const staleWarn = document.getElementById('control-stale-warning');
                 if (staleWarn) {
@@ -3350,8 +3420,12 @@
                     if (slider) slider.value = reserve;
                     if (number) number.value = reserve;
                 }
-                controlInitial = { mode, reserve };
-                controlTouched = { mode: false, reserve: false };
+                const gcInput = document.getElementById('control-grid-charging');
+                if (gcInput && gridCharging !== null) gcInput.checked = !!gridCharging;
+                const geSelect = document.getElementById('control-grid-export');
+                if (geSelect && gridExport) geSelect.value = gridExport;
+                controlInitial = { mode, reserve, grid_charging: gridCharging, grid_export: gridExport };
+                controlTouched = { mode: false, reserve: false, grid_charging: false, grid_export: false };
                 controlDirty = false;
                 updateReserve0Warning();
                 updateDirtyHint();
@@ -3392,7 +3466,7 @@
                 return;
             }
             setControlToken(token);
-            const { modeVal, reserveVal, mChanged, rChanged } = controlChanges();
+            const { modeVal, reserveVal, gcVal, geVal, mChanged, rChanged, gcChanged, geChanged } = controlChanges();
             if (!['self_consumption', 'backup', 'autonomous'].includes(modeVal)) {
                 setControlMessage('That mode is unknown.', 'error');
                 return;
@@ -3401,7 +3475,11 @@
                 setControlMessage('Reserve must be 0–100.', 'error');
                 return;
             }
-            if (!mChanged && !rChanged) {
+            if (geChanged && !['battery_ok', 'pv_only', 'never'].includes(geVal)) {
+                setControlMessage('Grid export mode is unknown.', 'error');
+                return;
+            }
+            if (!mChanged && !rChanged && !gcChanged && !geChanged) {
                 setControlMessage('Nothing to save.', '');
                 return;
             }
@@ -3453,7 +3531,7 @@
                         }
                         throw new Error(controlErrorText(r.resp.status, r.payload, null));
                     }
-                } else {
+                } else if (mChanged) {
                     const r = await postControl('mode', { value: modeVal }, token);
                     if (!r.resp.ok) {
                         if (r.resp.status === 401) {
@@ -3463,8 +3541,28 @@
                         throw new Error(controlErrorText(r.resp.status, r.payload, null));
                     }
                 }
+                if (gcChanged) {
+                    const r = await postControl('grid_charging', { value: !!gcVal }, token);
+                    if (!r.resp.ok) {
+                        if (r.resp.status === 401) {
+                            clearControlToken();
+                            if (tokenInput) tokenInput.value = '';
+                        }
+                        throw new Error(controlErrorText(r.resp.status, r.payload, 'Saving grid charging failed.'));
+                    }
+                }
+                if (geChanged) {
+                    const r = await postControl('grid_export', { value: geVal }, token);
+                    if (!r.resp.ok) {
+                        if (r.resp.status === 401) {
+                            clearControlToken();
+                            if (tokenInput) tokenInput.value = '';
+                        }
+                        throw new Error(controlErrorText(r.resp.status, r.payload, 'Saving grid export failed.'));
+                    }
+                }
                 setControlMessage('Saved. Takes a few seconds to apply.', 'success');
-                controlTouched = { mode: false, reserve: false };
+                controlTouched = { mode: false, reserve: false, grid_charging: false, grid_export: false };
                 controlDirty = false;
                 updateDirtyHint();
                 await loadControlValues(false);
@@ -3548,6 +3646,22 @@
                     controlTouched.mode = true;
                     controlDirty = true;
                     updateReserve0Warning();
+                    updateDirtyHint();
+                });
+            }
+            const gcInput = document.getElementById('control-grid-charging');
+            if (gcInput) {
+                gcInput.addEventListener('change', () => {
+                    controlTouched.grid_charging = true;
+                    controlDirty = true;
+                    updateDirtyHint();
+                });
+            }
+            const geSelect = document.getElementById('control-grid-export');
+            if (geSelect) {
+                geSelect.addEventListener('change', () => {
+                    controlTouched.grid_export = true;
+                    controlDirty = true;
                     updateDirtyHint();
                 });
             }

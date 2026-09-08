@@ -177,6 +177,92 @@ def build_discovery_payloads(
             payload["icon"] = icon
         return disc_topic, json.dumps(payload)
 
+    def number_entity(
+        uid_suffix: str,
+        name: str,
+        state_topic: str,
+        command_topic: str,
+        min_val: float,
+        max_val: float,
+        step: float = 1,
+        unit: Optional[str] = None,
+        icon: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Build a HA number (slider) discovery entry for writable controls."""
+        unique_id = f"pypowerwall_{gateway_id}_{uid_suffix}"
+        disc_topic = f"{ha_prefix}/number/{unique_id}/config"
+        payload: dict = {
+            "name": name,
+            "unique_id": unique_id,
+            "state_topic": state_topic,
+            "command_topic": command_topic,
+            "min": min_val,
+            "max": max_val,
+            "step": step,
+            "device": device,
+            "availability": avail(),
+            "availability_mode": "all",
+        }
+        if unit:
+            payload["unit_of_measurement"] = unit
+        if icon:
+            payload["icon"] = icon
+        return disc_topic, json.dumps(payload)
+
+    def select_entity(
+        uid_suffix: str,
+        name: str,
+        state_topic: str,
+        command_topic: str,
+        options: list[str],
+        icon: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Build a HA select discovery entry."""
+        unique_id = f"pypowerwall_{gateway_id}_{uid_suffix}"
+        disc_topic = f"{ha_prefix}/select/{unique_id}/config"
+        payload: dict = {
+            "name": name,
+            "unique_id": unique_id,
+            "state_topic": state_topic,
+            "command_topic": command_topic,
+            "options": options,
+            "device": device,
+            "availability": avail(),
+            "availability_mode": "all",
+        }
+        if icon:
+            payload["icon"] = icon
+        return disc_topic, json.dumps(payload)
+
+    def switch_entity(
+        uid_suffix: str,
+        name: str,
+        state_topic: str,
+        command_topic: str,
+        payload_on: str = "ON",
+        payload_off: str = "OFF",
+        icon: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Build a HA switch discovery entry."""
+        unique_id = f"pypowerwall_{gateway_id}_{uid_suffix}"
+        disc_topic = f"{ha_prefix}/switch/{unique_id}/config"
+        payload: dict = {
+            "name": name,
+            "unique_id": unique_id,
+            "state_topic": state_topic,
+            "command_topic": command_topic,
+            "payload_on": payload_on,
+            "payload_off": payload_off,
+            "state_on": payload_on,
+            "state_off": payload_off,
+            "device": device,
+            "availability": avail(),
+            "availability_mode": "all",
+        }
+        if icon:
+            payload["icon"] = icon
+        return disc_topic, json.dumps(payload)
+
     results: list[tuple[str, str]] = [
         # --- Numeric sensors ---
         sensor(
@@ -338,6 +424,62 @@ def build_discovery_payloads(
             icon="mdi:lan-connect",
         ),
     ]
+
+    # --- Controllable entities (only when control is enabled) ---
+    try:
+        from app.config import settings  # late import to avoid circular
+
+        if settings.control_enabled:
+            # Reserve as number (0–100 %)
+            results.append(
+                number_entity(
+                    "reserve_control",
+                    "Backup Reserve",
+                    f"{data_prefix}/reserve",
+                    f"{data_prefix}/reserve/set",
+                    0,
+                    100,
+                    1,
+                    "%",
+                    "mdi:battery-lock",
+                )
+            )
+            # Operation mode as select
+            results.append(
+                select_entity(
+                    "mode_control",
+                    "Operation Mode",
+                    f"{data_prefix}/mode",
+                    f"{data_prefix}/mode/set",
+                    ["self_consumption", "backup", "autonomous"],
+                    "mdi:cog",
+                )
+            )
+            # Grid charging as switch (ON/OFF ↔ true/false)
+            results.append(
+                switch_entity(
+                    "grid_charging_control",
+                    "Grid Charging",
+                    f"{data_prefix}/grid_charging",
+                    f"{data_prefix}/grid_charging/set",
+                    "ON",
+                    "OFF",
+                    "mdi:transmission-tower",
+                )
+            )
+            # Grid export as select
+            results.append(
+                select_entity(
+                    "grid_export_control",
+                    "Grid Export",
+                    f"{data_prefix}/grid_export",
+                    f"{data_prefix}/grid_export/set",
+                    ["battery_ok", "pv_only", "never"],
+                    "mdi:transmission-tower-export",
+                )
+            )
+    except Exception:
+        pass
 
     # --- Solar string sensors (per-string + paired rollups) ---
     if string_ids:

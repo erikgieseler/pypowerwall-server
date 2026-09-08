@@ -68,6 +68,7 @@ Topic layout
 import asyncio
 import json
 import logging
+import re
 import ssl
 from typing import List, Optional, Set
 
@@ -336,6 +337,19 @@ class MqttPublisher:
                         f"{prefix}/reserve", f"{data.reserve:.1f}", retain, qos
                     )
 
+                if data.grid_charging is not None:
+                    await self._safe_publish(
+                        f"{prefix}/grid_charging",
+                        "ON" if data.grid_charging else "OFF",
+                        retain,
+                        qos,
+                    )
+
+                if data.grid_export is not None:
+                    await self._safe_publish(
+                        f"{prefix}/grid_export", str(data.grid_export), retain, qos
+                    )
+
                 if data.version is not None:
                     await self._safe_publish(
                         f"{prefix}/version", str(data.version), retain, qos
@@ -553,12 +567,33 @@ class MqttPublisher:
                         retain=True, qos=settings.mqtt_qos,
                     )
 
+                    # Subscribe to control command topics (only when control is enabled).
+                    # Own topics (HA-internal) — not the sensor state topics.
+                    command_task = None
+                    if settings.control_enabled:
+                        try:
+                            prefix = settings.mqtt_topic_prefix.rstrip("/")
+                            for suffix in ("reserve/set", "mode/set", "grid_charging/set", "grid_export/set"):
+                                await client.subscribe(f"{prefix}/+/{suffix}")
+                            command_task = asyncio.create_task(
+                                self._handle_mqtt_commands(client)
+                            )
+                        except Exception as e:
+                            logger.warning(f"MQTT command subscribe failed: {e}")
+
                     # Inner heartbeat loop: stays alive until a publish failure
                     # sets _connected=False, or until shutdown is requested.
                     # The 5-second sleep matches the default poll interval so we
                     # detect disconnect promptly without busy-waiting.
                     while self._connected and not self._shutdown:
                         await asyncio.sleep(5)
+
+                    if command_task:
+                        command_task.cancel()
+                        try:
+                            await command_task
+                        except asyncio.CancelledError:
+                            pass
 
                     # If we exited the inner loop due to a publish failure
                     # (not shutdown), let the context manager close cleanly then
@@ -584,6 +619,99 @@ class MqttPublisher:
 
         self._connected = False
         self._client = None
+
+    async def _handle_mqtt_commands(self, client) -> None:
+        """Handle HA control command topics (reserve/mode/grid_* /set).
+
+        Own topics, only when control is enabled. Payloads are validated
+        like the HTTP /control/* endpoints; on success the gateway poll
+        cache will refresh and republish the new state.
+        """
+        from app.config import settings
+        from app.core.gateway_manager import gateway_manager
+
+        prefix = settings.mqtt_topic_prefix.rstrip("/")
+        valid_modes = {"self_consumption", "backup", "autonomous"}
+        valid_export = {"battery_ok", "pv_only", "never"}
+
+        try:
+            # aiomqtt>=2.3 message stream (there is no delivered_messages API).
+            async with client.messages() as messages:
+                async for message in messages:
+                    if self._shutdown or not settings.control_enabled:
+                        continue
+                    try:
+                        topic = str(message.topic.value if hasattr(message.topic, "value") else message.topic)
+                        payload_raw = message.payload
+                        payload = (
+                            payload_raw.decode().strip()
+                            if isinstance(payload_raw, (bytes, bytearray))
+                            else str(payload_raw).strip()
+                        )
+                    except Exception:
+                        continue
+
+                    # Expect prefix/{gateway_id}/{command}/set
+                    if not topic.startswith(prefix + "/"):
+                        continue
+                    remainder = topic[len(prefix) + 1 :]
+                    parts = remainder.split("/")
+                    if len(parts) != 3 or parts[2] != "set":
+                        continue
+                    gw_id, command = parts[0], parts[1]
+                    if gw_id not in gateway_manager.gateways:
+                        # Unknown gateway — try default if single gateway
+                        if "default" in gateway_manager.gateways:
+                            gw_id = "default"
+                        else:
+                            continue
+
+                    try:
+                        if command == "reserve":
+                            if not re.fullmatch(r"[+-]?\d+", payload):
+                                continue
+                            try:
+                                val = int(payload)
+                            except ValueError:
+                                continue
+                            if not 0 <= val <= 100:
+                                continue
+                            if gateway_manager._cloud_control:
+                                await gateway_manager.cloud_control("set_reserve", val, timeout=10.0)
+                            else:
+                                await gateway_manager.local_control(gw_id, "set_reserve", val, timeout=10.0)
+                        elif command == "mode":
+                            if payload not in valid_modes:
+                                continue
+                            if gateway_manager._cloud_control:
+                                await gateway_manager.cloud_control("set_mode", payload, timeout=10.0)
+                            else:
+                                await gateway_manager.local_control(gw_id, "set_mode", payload, timeout=10.0)
+                        elif command == "grid_charging":
+                            if payload not in ("ON", "OFF", "on", "off", "true", "false", "True", "False"):
+                                continue
+                            bool_val = payload.lower() in ("on", "true")
+                            if gateway_manager._cloud_control:
+                                await gateway_manager.cloud_control("set_grid_charging", bool_val, timeout=10.0)
+                            else:
+                                await gateway_manager.local_control(gw_id, "set_grid_charging", bool_val, timeout=10.0)
+                        elif command == "grid_export":
+                            if payload not in valid_export:
+                                continue
+                            if gateway_manager._cloud_control:
+                                await gateway_manager.cloud_control("set_grid_export", payload, timeout=10.0)
+                            else:
+                                await gateway_manager.local_control(gw_id, "set_grid_export", payload, timeout=10.0)
+                        else:
+                            continue
+                    except Exception as e:
+                        logger.debug(f"MQTT command {command} failed for {gw_id}: {e}")
+                        continue
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.debug(f"MQTT command handler exited: {e}")
+            return
 
 
 def _safe_float(val) -> Optional[float]:

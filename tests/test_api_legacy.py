@@ -385,6 +385,82 @@ def test_control_grid_charging_non_boolean_value_returns_400(
     assert response.status_code == 400
 
 
+def test_control_grid_export_routes_to_cloud(
+    control_client, connected_gateway
+):
+    """Test that POST /control/grid_export uses cloud_control when _cloud_control is set."""
+    from app.core.gateway_manager import gateway_manager
+
+    mock_cloud = Mock()
+    mock_cloud.set_grid_export.return_value = {"result": "Updated"}
+    gateway_manager._cloud_control = mock_cloud
+
+    response = control_client.post(
+        "/control/grid_export",
+        json={"value": "battery_ok"},
+        headers={"Authorization": _CONTROL_TOKEN},
+    )
+
+    assert response.status_code == 200
+    mock_cloud.set_grid_export.assert_called_once_with("battery_ok")
+
+
+def test_control_grid_export_missing_value_returns_400(
+    control_client, connected_gateway
+):
+    """Test that POST /control/grid_export without 'value' returns 400."""
+    from app.core.gateway_manager import gateway_manager
+
+    mock_cloud = Mock()
+    gateway_manager._cloud_control = mock_cloud
+
+    response = control_client.post(
+        "/control/grid_export",
+        json={},
+        headers={"Authorization": _CONTROL_TOKEN},
+    )
+
+    assert response.status_code == 400
+
+
+def test_control_grid_export_invalid_value_returns_400(
+    control_client, connected_gateway
+):
+    """Test that POST /control/grid_export with an invalid mode returns 400."""
+    from app.core.gateway_manager import gateway_manager
+
+    mock_cloud = Mock()
+    gateway_manager._cloud_control = mock_cloud
+
+    response = control_client.post(
+        "/control/grid_export",
+        json={"value": "everything"},
+        headers={"Authorization": _CONTROL_TOKEN},
+    )
+
+    assert response.status_code == 400
+    mock_cloud.set_grid_export.assert_not_called()
+
+
+def test_control_grid_export_fallback_without_cloud(
+    control_client, connected_gateway, mock_pypowerwall
+):
+    """POST /control/grid_export without cloud control calls set_grid_export() locally."""
+    from app.core.gateway_manager import gateway_manager
+
+    gateway_manager._cloud_control = None
+    mock_pypowerwall.set_grid_export.return_value = {"result": "Updated"}
+
+    response = control_client.post(
+        "/control/grid_export",
+        json={"value": "pv_only"},
+        headers={"Authorization": _CONTROL_TOKEN},
+    )
+
+    assert response.status_code == 200
+    mock_pypowerwall.set_grid_export.assert_called_once_with("pv_only")
+
+
 def test_control_cloud_returns_none_gives_503(
     control_client, connected_gateway, monkeypatch
 ):
@@ -493,7 +569,10 @@ def test_control_status_enabled_when_secret_set(control_client):
     """GET /control/status returns enabled=true without auth when secret is set."""
     response = control_client.get("/control/status")
     assert response.status_code == 200
-    assert response.json() == {"enabled": True}
+    data = response.json()
+    assert data["enabled"] is True
+    assert "grid_available" in data
+    assert isinstance(data["grid_available"], bool)
 
 
 def test_control_status_disabled_without_secret(client):
@@ -503,7 +582,9 @@ def test_control_status_disabled_without_secret(client):
     assert not settings.control_secret
     response = client.get("/control/status")
     assert response.status_code == 200
-    assert response.json() == {"enabled": False}
+    data = response.json()
+    assert data["enabled"] is False
+    assert "grid_available" in data
 
 
 def test_control_status_leaks_no_secret(control_client):

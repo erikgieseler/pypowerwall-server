@@ -2,6 +2,11 @@
 
 ## Version History
 
+### [0.6.5] - Upcoming
+
+**Added:**
+- **Grid charging and grid export control in Console and Home Assistant** — the Powerwall Control card now includes a grid charging toggle and a grid export select (Battery OK / Solar only / Never), shown only when cloud control is configured. Values are polled via the cloud and exposed in `GET /api/operation` (`grid_charging`, `grid_export`, stale-aware). Writes go through `POST /control/grid_charging` and `POST /control/grid_export` (validated, `battery_ok`/`pv_only`/`never`). Home Assistant auto-discovery now exposes controllable entities for reserve (`number`), mode (`select`), grid charging (`switch`), and grid export (`select`) on own `…/set` command topics; state topics remain the existing sensor topics. MQTT state for `grid_charging` (`ON`/`OFF`) and `grid_export` is now published.
+
 ### [0.6.4] - 2026-09-07
 
 **Added:**

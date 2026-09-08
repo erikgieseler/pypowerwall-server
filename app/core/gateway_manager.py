@@ -178,6 +178,10 @@ class GatewayManager:
         self._cloud_mode_time: Optional[float] = None
         self._cloud_reserve: Optional[float] = None
         self._cloud_reserve_time: Optional[float] = None
+        self._cloud_grid_charging: Optional[bool] = None
+        self._cloud_grid_charging_time: Optional[float] = None
+        self._cloud_grid_export: Optional[str] = None
+        self._cloud_grid_export_time: Optional[float] = None
 
     @staticmethod
     def _expected_battery_block_count(data: Optional[PowerwallData]) -> int:
@@ -881,6 +885,47 @@ class GatewayManager:
                     logger.debug(
                         f"Reserve not available via cloud control for {gateway_id}: {e}"
                     )
+                # Grid charging/export are optional reads; do not affect
+                # cloud-link health tracking — a mock or missing method on a
+                # test double must not flip the link from degraded to healthy.
+                try:
+                    if self._cloud_control:
+                        loop_gc = asyncio.get_running_loop()
+                        cloud_gc = await asyncio.wait_for(
+                            loop_gc.run_in_executor(
+                                self._executor, self._cloud_control.get_grid_charging
+                            ),
+                            timeout=step_timeout,
+                        )
+                        if isinstance(cloud_gc, bool):
+                            data.grid_charging = cloud_gc
+                            self._cloud_grid_charging = cloud_gc
+                            self._cloud_grid_charging_time = time.time()
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.debug(
+                        f"Grid charging not available via cloud control for {gateway_id}: {e}"
+                    )
+                try:
+                    if self._cloud_control:
+                        loop_ge = asyncio.get_running_loop()
+                        cloud_ge = await asyncio.wait_for(
+                            loop_ge.run_in_executor(
+                                self._executor, self._cloud_control.get_grid_export
+                            ),
+                            timeout=step_timeout,
+                        )
+                        if isinstance(cloud_ge, str) and cloud_ge in (
+                            "battery_ok",
+                            "pv_only",
+                            "never",
+                        ):
+                            data.grid_export = cloud_ge
+                            self._cloud_grid_export = cloud_ge
+                            self._cloud_grid_export_time = time.time()
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.debug(
+                        f"Grid export not available via cloud control for {gateway_id}: {e}"
+                    )
         if not basic_lan:
             try:
                 data.mode = await asyncio.wait_for(
@@ -912,6 +957,29 @@ class GatewayManager:
                 )
             except (asyncio.TimeoutError, Exception) as e:
                 logger.debug(f"System status not available for {gateway_id}: {e}")
+
+        # Grid charging/export reads for pure cloud/FleetAPI gateways on
+        # their own connection (hybrid is covered above via the shared
+        # cloud-control connection; local TEDAPI has no such endpoint).
+        if gateway and (gateway.cloud_mode or gateway.fleetapi):
+            try:
+                gc = await asyncio.wait_for(
+                    loop.run_in_executor(self._executor, pw.get_grid_charging),
+                    timeout=step_timeout,
+                )
+                if isinstance(gc, bool):
+                    data.grid_charging = gc
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.debug(f"Grid charging not available for {gateway_id}: {e}")
+            try:
+                ge = await asyncio.wait_for(
+                    loop.run_in_executor(self._executor, pw.get_grid_export),
+                    timeout=step_timeout,
+                )
+                if isinstance(ge, str) and ge in ("battery_ok", "pv_only", "never"):
+                    data.grid_export = ge
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.debug(f"Grid export not available for {gateway_id}: {e}")
 
         # Try to get fan speeds for /fans endpoint (TEDAPI only)
         # get_fan_speeds() lives on the TEDAPI client (pw.tedapi),
@@ -1775,6 +1843,10 @@ class GatewayManager:
             "last_known_mode_time": self._cloud_mode_time,
             "last_known_reserve": self._cloud_reserve,
             "last_known_reserve_time": self._cloud_reserve_time,
+            "last_known_grid_charging": self._cloud_grid_charging,
+            "last_known_grid_charging_time": self._cloud_grid_charging_time,
+            "last_known_grid_export": self._cloud_grid_export,
+            "last_known_grid_export_time": self._cloud_grid_export_time,
         }
 
     async def cloud_control(

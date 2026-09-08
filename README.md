@@ -676,6 +676,16 @@ curl -X POST http://localhost:8675/control/mode \
 curl -X POST http://localhost:8675/control/mode \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"value": "self_consumption", "level": 20}'
+
+# Allow/disallow charging from grid
+curl -X POST http://localhost:8675/control/grid_charging \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"value": true}'
+
+# Set grid export mode (battery_ok, pv_only, never)
+curl -X POST http://localhost:8675/control/grid_export \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"value": "battery_ok"}'
 ```
 
 > **Note on reserve 0:** changing the operating mode together with a reserve
@@ -686,16 +696,23 @@ curl -X POST http://localhost:8675/control/mode \
 
 **Web Console (`/console`):** when `PW_CONTROL_SECRET` is set, the Console shows
 a *Powerwall Control* card (after System Health) with mode select
-(Self-Consumption/Backup/Time-Based), reserve slider + number (0–100) and a
+(Self-Consumption/Backup/Time-Based), reserve slider + number (0–100), grid
+charging toggle and grid export select (Battery OK / Solar only / Never), and a
 token field (kept in the tab by default, optional “Remember my token on this
 device” persists it in `localStorage`; sent as `Authorization: Bearer <token>`
-per request).
+per request). Grid fields are shown only when cloud control is configured
+(`grid_available` from `GET /control/status`).
 Availability is checked via unauthenticated `GET /control/status`
-(`{"enabled": bool}`); current values come from `GET /api/operation`. One Save
-button sends a single combined `POST /control/mode {"value": mode, "level":
-reserve}` when both changed (reserve 0 + mode change is auto-split into two
-calls, see note above), otherwise a single `/control/reserve` or `/control/mode`
-call. Controls the default gateway.
+(`{"enabled": bool, "grid_available": bool}`); current values come from
+`GET /api/operation` (`grid_charging`, `grid_export` included). One Save button
+sends a single combined `POST /control/mode {"value": mode, "level": reserve}`
+when both changed (reserve 0 + mode change is auto-split into two calls, see
+note above), otherwise a single `/control/reserve` or `/control/mode` call,
+followed by sequential `grid_charging` / `grid_export` writes if changed.
+Controls the default gateway. When `MQTT_HOST` is set, the same 4 controls are
+also exposed in Home Assistant via MQTT (`number` for reserve, `select` for
+mode, `switch` for grid charging, `select` for grid export) on own
+`…/set` command topics.
 
 ### Data Aggregation Strategy
 Multi-gateway aggregation uses **smart aggregation** that will evolve over time:

@@ -128,14 +128,22 @@ def _expansion_parent_indexes(
 async def control_status():
     """Control availability for the Console WebGUI (unauthenticated).
 
-    Returns only ``{"enabled": bool}`` derived from
-    ``settings.control_enabled`` (i.e. ``PW_CONTROL_SECRET`` is set).
+    Returns ``{"enabled": bool, "grid_available": bool}``. ``enabled`` is
+    derived from ``settings.control_enabled`` (i.e. ``PW_CONTROL_SECRET``
+    is set); ``grid_available`` tells whether grid charging/export reads
+    can work (hybrid cloud link configured or a cloud/FleetAPI gateway).
     Deliberately contains no secret and no gateway details because
     ``/console`` and ``/stats`` are unauthenticated — the browser needs
     to know *whether* to show the Control card without learning the token.
     All actual writes stay behind ``verify_control_token``.
     """
-    return {"enabled": settings.control_enabled}
+    gw_cloud = any(
+        g.cloud_mode or g.fleetapi for g in gateway_manager.gateways.values()
+    )
+    return {
+        "enabled": settings.control_enabled,
+        "grid_available": bool(gateway_manager.cloud_link_status()) or gw_cloud,
+    }
 
 
 @router.post("/control/{path:path}")
@@ -144,8 +152,9 @@ async def control_api(
 ):
     """Authenticated control endpoint for POST operations.
 
-    Routes to cloud control connection for write operations (set_reserve, set_mode,
-    set_grid_charging) when available, since TEDAPI doesn't support POST/write APIs.
+    Routes to cloud control connection for write operations (set_reserve,
+    set_mode, set_grid_charging, set_grid_export) when available, since
+    TEDAPI doesn't support POST/write APIs.
     Falls back to direct post for cloud-mode or FleetAPI gateways.
 
     Optional companion parameters (ported from pypowerwall PR #308):
@@ -161,6 +170,14 @@ async def control_api(
             raise HTTPException(
                 status_code=400,
                 detail="'value' must be a boolean (true or false)",
+            )
+
+    if path == "grid_export":
+        valid_export = ["battery_ok", "pv_only", "never"]
+        if data.get("value") not in valid_export:
+            raise HTTPException(
+                status_code=400,
+                detail="'value' must be one of: battery_ok, pv_only, never",
             )
 
     # Same for reserve and mode: an empty or typoed payload must never
@@ -263,6 +280,7 @@ async def control_api(
         "reserve": ("set_reserve", lambda d: [d["value"]]),
         "mode": ("set_mode", lambda d: [d["value"]]),
         "grid_charging": ("set_grid_charging", lambda d: [d["value"]]),
+        "grid_export": ("set_grid_export", lambda d: [d["value"]]),
     }
 
     if path in control_map:
@@ -1314,12 +1332,18 @@ async def get_api_operation():
     # the real fallbacks for gateways that can provide them.
     real_mode = None
     backup_reserve_percent = None
+    grid_charging = None
+    grid_export = None
     stale = False
     last_updated = None
 
     if status and status.data:
         if status.data.reserve is not None:
             backup_reserve_percent = status.data.reserve
+        if status.data.grid_charging is not None:
+            grid_charging = status.data.grid_charging
+        if status.data.grid_export is not None:
+            grid_export = status.data.grid_export
 
         # Use the cached operation mode polled by the background task.
         # Fall back to system_status.default_real_mode if mode isn't cached yet.
@@ -1336,7 +1360,12 @@ async def get_api_operation():
     # time — instead of either fabricating a default or silently freezing
     # the previous reading. When no cloud value was ever seen, null stands
     # and consumers render "unavailable".
-    if real_mode is None or backup_reserve_percent is None:
+    if (
+        real_mode is None
+        or backup_reserve_percent is None
+        or grid_charging is None
+        or grid_export is None
+    ):
         cloud_link = gateway_manager.cloud_link_status()
         if cloud_link:
             times = []
@@ -1353,12 +1382,30 @@ async def get_api_operation():
                 stale = True
                 if cloud_link["last_known_reserve_time"]:
                     times.append(cloud_link["last_known_reserve_time"])
+            if (
+                grid_charging is None
+                and cloud_link["last_known_grid_charging"] is not None
+            ):
+                grid_charging = cloud_link["last_known_grid_charging"]
+                stale = True
+                if cloud_link["last_known_grid_charging_time"]:
+                    times.append(cloud_link["last_known_grid_charging_time"])
+            if (
+                grid_export is None
+                and cloud_link["last_known_grid_export"] is not None
+            ):
+                grid_export = cloud_link["last_known_grid_export"]
+                stale = True
+                if cloud_link["last_known_grid_export_time"]:
+                    times.append(cloud_link["last_known_grid_export_time"])
             if times:
                 last_updated = max(times)
 
     return {
         "real_mode": real_mode,
         "backup_reserve_percent": backup_reserve_percent,
+        "grid_charging": grid_charging,
+        "grid_export": grid_export,
         "stale": stale,
         "last_updated": last_updated,
     }

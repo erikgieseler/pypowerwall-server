@@ -155,6 +155,8 @@ class PowerwallData(BaseModel):
     device_type: Optional[str] = None
     site_name: Optional[str] = None  # Site name from Powerwall
     mode: Optional[str] = None  # Operation mode: "self_consumption", "backup", "autonomous" (time-based)
+    grid_charging: Optional[bool] = None  # Allow charging from grid (cloud-only)
+    grid_export: Optional[str] = None  # Grid export mode: battery_ok, pv_only, never (cloud-only)
     pw3: Optional[bool] = None  # True if Powerwall 3 system
     tedapi_mode: Optional[str] = None  # TEDAPI mode (e.g., "FleetAPI")
     tedapi_config: Optional[Dict[str, Any]] = None  # Cached /tedapi/config response; battery_blocks[].type used for model detection
