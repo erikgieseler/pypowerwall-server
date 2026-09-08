@@ -714,7 +714,8 @@ also exposed in Home Assistant via MQTT (`number` for reserve, `select` for
 mode, `switch` for grid charging, `select` for grid export) on own
 `…/set` command topics. Note: anyone with MQTT publish rights on these
 command topics can control the Powerwall — restrict broker access (auth, ACLs,
-TLS) accordingly.
+TLS) accordingly. Cloud control uses a single Tesla site connection; true
+multi-site cloud control would require separate connections (known limit).
 
 ### Data Aggregation Strategy
 Multi-gateway aggregation uses **smart aggregation** that will evolve over time:
