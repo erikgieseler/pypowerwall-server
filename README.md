@@ -694,6 +694,20 @@ curl -X POST http://localhost:8675/control/grid_export \
 > stick). If you need mode + reserve 0, set the mode with the *current* reserve
 > level first, then set the reserve to `0` in a separate call.
 
+> **Note on Cloud reserve limit:** Tesla Cloud/FleetAPI currently caps
+> `backup_reserve_percent` at **80 %** (local TEDAPI v1r can go to 100 %).
+> The server validates `0–100` syntactically; a `90 %` request via Cloud will
+> be accepted by the server but clamped/rejected by Tesla. Use local v1r for
+> >80 % or expect the follow-up Cloud-side guard/warning documented in
+> `RELEASE.md` 0.6.5.
+
+> **Note on atomicity:** `POST /control/mode` + `/reserve` + `/grid_*` are
+> separate writes today — matching the underlying Powerwall `operation` API
+> which *can* set `mode` + `reserve` + `customer_preferred_export_rule` atomically
+> in one request. Between separate calls a partial configuration can remain if
+> one fails; a future `POST /control/operation {mode,reserve,grid_export,grid_charging}`
+> single-request endpoint is planned for robust automation.
+
 **Web Console (`/console`):** when `PW_CONTROL_SECRET` is set, the Console shows
 a *Powerwall Control* card (after System Health) with mode select
 (Self-Consumption/Backup/Time-Based), reserve slider + number (0–100), grid

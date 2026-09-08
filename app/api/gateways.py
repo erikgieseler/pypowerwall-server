@@ -120,12 +120,17 @@ async def proxy_gateway_api(gateway_id: str, path: str):
     "/{gateway_id}/api/{path:path}", dependencies=[Depends(verify_control_token)]
 )
 async def proxy_gateway_api_post(gateway_id: str, path: str, data: dict):
-    """Proxy POST requests to a specific gateway.
+    """Proxy POST requests to a specific gateway — low-level admin API.
 
     Writes to the gateway are control operations, so this endpoint requires
     the same PW_CONTROL_SECRET bearer token as the legacy /control routes.
     Without it, this route would let any client on the network change
     operating mode or backup reserve, bypassing control auth entirely.
+
+    This is a low-level authenticated Powerwall API proxy. It intentionally
+    bypasses the high-level control validation (allowed values, capability
+    checks, write-lock) of ``POST /control/*`` and should only be exposed
+    to trusted administrators.
 
     Args:
         gateway_id: Gateway identifier

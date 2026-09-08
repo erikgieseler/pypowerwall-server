@@ -445,10 +445,12 @@ def test_control_grid_export_invalid_value_returns_400(
 def test_control_grid_export_fallback_without_cloud(
     control_client, connected_gateway, mock_pypowerwall
 ):
-    """POST /control/grid_export without cloud control calls set_grid_export() locally."""
+    """POST /control/grid_export without cloud control calls set_grid_export() locally (v1r)."""
     from app.core.gateway_manager import gateway_manager
 
     gateway_manager._cloud_control = None
+    # Local TEDAPI needs v1r for grid writes
+    gateway_manager.gateways["test-gateway"].rsa_key_configured = True
     mock_pypowerwall.set_grid_export.return_value = {"result": "Updated"}
 
     response = control_client.post(
@@ -459,6 +461,26 @@ def test_control_grid_export_fallback_without_cloud(
 
     assert response.status_code == 200
     mock_pypowerwall.set_grid_export.assert_called_once_with("pv_only")
+
+
+def test_control_grid_export_without_cloud_plain_tedapi_returns_503(
+    control_client, connected_gateway, mock_pypowerwall
+):
+    """Plain TEDAPI without v1r/cloud has no grid write capability → 503."""
+    from app.core.gateway_manager import gateway_manager
+
+    gateway_manager._cloud_control = None
+    gateway_manager.gateways["test-gateway"].rsa_key_configured = False
+    mock_pypowerwall.set_grid_export.return_value = {"result": "Updated"}
+
+    response = control_client.post(
+        "/control/grid_export",
+        json={"value": "pv_only"},
+        headers={"Authorization": _CONTROL_TOKEN},
+    )
+
+    assert response.status_code == 503
+    mock_pypowerwall.set_grid_export.assert_not_called()
 
 
 def test_control_cloud_returns_none_gives_503(

@@ -2,6 +2,11 @@
 from typing import Optional, Dict, Any, List, Union
 from pydantic import BaseModel, Field  # pylint: disable=no-name-in-module
 
+# Central definition for grid export modes — single source for API validation,
+# polling, MQTT and HA. Keeps Console, REST, MQTT and HA from drifting.
+GRID_EXPORT_MODES: tuple[str, ...] = ("battery_ok", "pv_only", "never")
+GRID_EXPORT_MODES_SET: set[str] = set(GRID_EXPORT_MODES)
+
 
 class Gateway(BaseModel):
     """Represents a Powerwall gateway configuration.
@@ -155,8 +160,8 @@ class PowerwallData(BaseModel):
     device_type: Optional[str] = None
     site_name: Optional[str] = None  # Site name from Powerwall
     mode: Optional[str] = None  # Operation mode: "self_consumption", "backup", "autonomous" (time-based)
-    grid_charging: Optional[bool] = None  # Allow charging from grid (cloud-only)
-    grid_export: Optional[str] = None  # Grid export mode: battery_ok, pv_only, never (cloud-only)
+    grid_charging: Optional[bool] = None  # Allow charging from grid (hybrid/cloud/FleetAPI or v1r local)
+    grid_export: Optional[str] = None  # Grid export mode: battery_ok, pv_only, never (hybrid/cloud/FleetAPI or v1r local)
     pw3: Optional[bool] = None  # True if Powerwall 3 system
     tedapi_mode: Optional[str] = None  # TEDAPI mode (e.g., "FleetAPI")
     tedapi_config: Optional[Dict[str, Any]] = None  # Cached /tedapi/config response; battery_blocks[].type used for model detection

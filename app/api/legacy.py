@@ -137,10 +137,13 @@ async def control_status():
     to know *whether* to show the Control card without learning the token.
     All actual writes stay behind ``verify_control_token``.
     """
-    grid_available = any(
-        gateway_manager.gateway_grid_capable(gid)
-        for gid in gateway_manager.gateways
-    )
+    # Console controls the default gateway — capability must reflect
+    # that gateway, not "any gateway can do it".
+    try:
+        default_gid = get_default_gateway()
+        grid_available = gateway_manager.gateway_grid_capable(default_gid)
+    except HTTPException:
+        grid_available = False
     return {
         "enabled": settings.control_enabled,
         "grid_available": grid_available,
@@ -174,11 +177,12 @@ async def control_api(
             )
 
     if path == "grid_export":
-        valid_export = ["battery_ok", "pv_only", "never"]
-        if data.get("value") not in valid_export:
+        from app.models.gateway import GRID_EXPORT_MODES  # late import to avoid circular
+
+        if data.get("value") not in GRID_EXPORT_MODES:
             raise HTTPException(
                 status_code=400,
-                detail="'value' must be one of: battery_ok, pv_only, never",
+                detail=f"'value' must be one of: {', '.join(GRID_EXPORT_MODES)}",
             )
 
     # Same for reserve and mode: an empty or typoed payload must never
@@ -291,10 +295,16 @@ async def control_api(
                 method, *args_fn(data), timeout=10.0
             )
         else:
-            # Local mode (v1r / Basic LAN): call the mapped library method on
-            # the gateway's own connection instead of a raw POST, which the
-            # gateway's local API rejects with "Unknown API".
+            # Local mode (v1r): call the mapped library method on the
+            # gateway's own connection; Basic LAN without cloud is
+            # read-only and must not try a Powerwall write at all.
             gateway_id = get_default_gateway()
+            if path in ("grid_charging", "grid_export") and not gateway_manager.gateway_grid_capable(
+                gateway_id
+            ):
+                raise HTTPException(
+                    status_code=503, detail="Control unavailable for this gateway"
+                )
             result = await gateway_manager.local_control(
                 gateway_id, method, *args_fn(data), timeout=10.0
             )

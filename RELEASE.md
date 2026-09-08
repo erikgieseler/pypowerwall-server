@@ -7,6 +7,10 @@
 **Added:**
 - **Grid charging and grid export control in Console and Home Assistant** — the Powerwall Control card now includes a grid charging toggle and a grid export select (Battery OK / Solar only / Never), shown wherever the gateway supports it: hybrid/cloud gateways via cloud reads, local TEDAPI/v1r gateways via local reads (Basic LAN without cloud exposes neither). Values are exposed in `GET /api/operation` (`grid_charging`, `grid_export`, stale-aware). Writes go through `POST /control/grid_charging` and `POST /control/grid_export` (validated, `battery_ok`/`pv_only`/`never`). Home Assistant auto-discovery now exposes controllable entities for reserve (`number`), mode (`select`), grid charging (`switch`), and grid export (`select`) on own `…/set` command topics (grid entities only where supported); state topics remain the existing sensor topics. MQTT state for `grid_charging` (`ON`/`OFF`) and `grid_export` is now published. Note: MQTT publish rights on the command topics equal Powerwall control rights — restrict broker access accordingly.
 
+**Notes / follow-ups (not changed in this PR):**
+- The underlying Powerwall `operation` endpoint can set `mode` + `backup_reserve_percent` + `customer_preferred_export_rule` atomically in one request. The server's `/control/*` endpoints are intentionally separate writes today (`/control/mode`, `/control/reserve`, `/control/grid_charging`, `/control/grid_export`); a future combined endpoint `POST /control/operation {"mode":…, "reserve":…, "grid_export":…, "grid_charging":…}` is planned for robust home-automation use (avoids partial-apply if one of several sequential writes fails).
+- Tesla Cloud/FleetAPI currently caps backup reserve at **80 %** (local TEDAPI v1r can exceed it). The server validates `0–100` syntactically; a `90 %` request via Cloud will be accepted by the server but clamped/rejected by Tesla. Use local v1r for >80 % or add a Cloud-side guard/warning in a follow-up.
+
 ### [0.6.4] - 2026-09-07
 
 **Added:**

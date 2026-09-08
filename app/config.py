@@ -217,7 +217,7 @@ class GatewayConfig(BaseModel):
     field not passed explicitly.
     """
 
-    id: str
+    id: str = Field(pattern=r"^[a-zA-Z0-9_-]+$")  # MQTT/discovery-safe; no /, +, #, space
     name: Optional[str] = None  # Defaults to id when omitted
     host: Optional[str] = None
     port: Optional[int] = Field(

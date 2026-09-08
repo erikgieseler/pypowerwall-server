@@ -432,6 +432,7 @@ def build_discovery_payloads(
     # --- Controllable entities (only when control is enabled) ---
     try:
         from app.config import settings  # late import to avoid circular
+        from app.models.gateway import GRID_EXPORT_MODES  # central enum
 
         if settings.control_enabled:
             # Reserve as number (0–100 %)
@@ -480,7 +481,7 @@ def build_discovery_payloads(
                         "Grid Export",
                         f"{data_prefix}/grid_export",
                         f"{data_prefix}/grid_export/set",
-                        ["battery_ok", "pv_only", "never"],
+                        list(GRID_EXPORT_MODES),
                         "mdi:transmission-tower-export",
                     )
                 )

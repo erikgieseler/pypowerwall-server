@@ -24,6 +24,7 @@ def _reset_singleton_state():
     gateway_manager._cloud_control_task = None
     # Hybrid cloud-link health bookkeeping (issue #87)
     gateway_manager._cloud_control_configured = False
+    gateway_manager._cloud_control_gateway_ids.clear()
     gateway_manager._cloud_failures = 0
     gateway_manager._cloud_last_success = None
     gateway_manager._cloud_mode = None

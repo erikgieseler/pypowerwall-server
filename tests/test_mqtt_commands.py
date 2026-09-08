@@ -153,8 +153,8 @@ async def test_mqtt_commands_need_control_enabled(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_mqtt_commands_unknown_gateway_falls_back_to_default(monkeypatch):
-    """Unknown gateway id falls back to 'default' for local control."""
+async def test_mqtt_commands_unknown_gateway_is_ignored(monkeypatch):
+    """Unknown gateway id is ignored — no fallback to default for control topics."""
     monkeypatch.setattr(settings, "control_secret", "test-secret")
     old_shutdown = mqtt_publisher._shutdown
     mqtt_publisher._shutdown = False
@@ -168,7 +168,7 @@ async def test_mqtt_commands_unknown_gateway_falls_back_to_default(monkeypatch):
         await mqtt_publisher._handle_mqtt_commands(
             _FakeClient([_msg(pre + "/nope/mode/set", b"autonomous")])
         )
-        assert ("local:default:set_mode", ("autonomous",)) in calls
+        assert calls == []
     finally:
         restore()
         mqtt_publisher._shutdown = old_shutdown
@@ -202,23 +202,39 @@ async def test_mqtt_commands_skip_incapable_gateway(monkeypatch):
 
 
 def test_gateway_grid_capable_hybrid():
-    """Hybrid cloud configured covers every gateway."""
+    """Hybrid cloud configured covers only the hybrid gateway, not others."""
     gateway_manager._cloud_control_configured = True
+    gateway_manager._cloud_control_gateway_ids.add("x")
     gateway_manager.gateways["x"] = Gateway(id="x", name="X", basic_lan=True)
+    gateway_manager.gateways["y"] = Gateway(id="y", name="Y", basic_lan=True)
     try:
         assert gateway_manager.gateway_grid_capable("x") is True
+        assert gateway_manager.gateway_grid_capable("y") is False
     finally:
         gateway_manager._cloud_control_configured = False
+        gateway_manager._cloud_control_gateway_ids.clear()
 
 
 def test_gateway_grid_capable_local_tedapi():
-    """Local TEDAPI/v1r gateway: reads work, capability true."""
+    """Plain TEDAPI (no v1r, no cloud) has no grid write capability."""
     gw = Gateway(id="t", name="T", host="192.168.91.1", gw_pwd="secret")
     gateway_manager.gateways["t"] = gw
     try:
-        assert gateway_manager.gateway_grid_capable("t") is True
+        assert gateway_manager.gateway_grid_capable("t") is False
     finally:
         del gateway_manager.gateways["t"]
+
+
+def test_gateway_grid_capable_local_v1r():
+    """Local v1r gateway supports grid writes."""
+    gw = Gateway(
+        id="v1", name="V1", host="192.168.91.1", gw_pwd="secret", rsa_key_configured=True
+    )
+    gateway_manager.gateways["v1"] = gw
+    try:
+        assert gateway_manager.gateway_grid_capable("v1") is True
+    finally:
+        del gateway_manager.gateways["v1"]
 
 
 def test_gateway_grid_capable_basic_lan_only():

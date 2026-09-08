@@ -70,7 +70,13 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 import pypowerwall
-from app.models.gateway import Gateway, GatewayStatus, PowerwallData, AggregateData
+from app.models.gateway import (
+    Gateway,
+    GatewayStatus,
+    PowerwallData,
+    AggregateData,
+    GRID_EXPORT_MODES,
+)
 from app.core.scaling import raw_to_tesla_battery_percent
 from app.config import GatewayConfig
 
@@ -168,7 +174,8 @@ class GatewayManager:
         # from local gateway poll failures. A WAN outage leaves local
         # monitoring healthy while cloud control degrades, and the Console
         # needs to show both links independently.
-        self._cloud_control_configured = False  # hybrid credentials present
+        self._cloud_control_configured = False  # hybrid credentials present (any gateway)
+        self._cloud_control_gateway_ids: set[str] = set()  # which gateways have hybrid credentials
         self._cloud_failures = 0  # consecutive cloud call failures
         self._cloud_last_success: Optional[float] = None  # last successful call
         # Last known cloud-sourced operation values + fetch timestamps. Used
@@ -451,6 +458,7 @@ class GatewayManager:
         # Hybrid configured => the cloud link exists as a tracked link even
         # while the connection itself is down (issue #87 per-link health).
         self._cloud_control_configured = bool(hybrid_configs)
+        self._cloud_control_gateway_ids = {c.id for c in hybrid_configs}
         if hybrid_configs:
             self._cloud_control_task = asyncio.create_task(
                 self._init_cloud_control(hybrid_configs), name="cloud-control-init"
@@ -914,11 +922,7 @@ class GatewayManager:
                             ),
                             timeout=step_timeout,
                         )
-                        if isinstance(cloud_ge, str) and cloud_ge in (
-                            "battery_ok",
-                            "pv_only",
-                            "never",
-                        ):
+                        if isinstance(cloud_ge, str) and cloud_ge in GRID_EXPORT_MODES:
                             data.grid_export = cloud_ge
                             self._cloud_grid_export = cloud_ge
                             self._cloud_grid_export_time = time.time()
@@ -976,7 +980,7 @@ class GatewayManager:
                     loop.run_in_executor(self._executor, pw.get_grid_export),
                     timeout=step_timeout,
                 )
-                if isinstance(ge, str) and ge in ("battery_ok", "pv_only", "never"):
+                if isinstance(ge, str) and ge in GRID_EXPORT_MODES:
                     data.grid_export = ge
             except (asyncio.TimeoutError, Exception) as e:
                 logger.debug(f"Grid export not available for {gateway_id}: {e}")
@@ -1000,7 +1004,7 @@ class GatewayManager:
                     loop.run_in_executor(self._executor, pw.get_grid_export),
                     timeout=step_timeout,
                 )
-                if isinstance(local_ge, str) and local_ge in ("battery_ok", "pv_only", "never"):
+                if isinstance(local_ge, str) and local_ge in GRID_EXPORT_MODES:
                     data.grid_export = local_ge
             except (asyncio.TimeoutError, Exception) as e:
                 logger.debug(f"Grid export not available locally for {gateway_id}: {e}")
@@ -1834,21 +1838,28 @@ class GatewayManager:
     def gateway_grid_capable(self, gateway_id: str) -> bool:
         """Whether grid charging/export controls can work for a gateway.
 
-        True with hybrid cloud control, on cloud/FleetAPI gateways, or on
-        local TEDAPI/v1r gateways (reads work locally; writes need v1r and
-        otherwise fail with 503). Basic LAN without cloud exposes neither
-        reads nor writes locally.
+        Capability is gateway-specific, not global.  Cloud/FleetAPI gateways
+        always support grid control.  Hybrid cloud credentials lift only the
+        gateway they belong to.  Local TEDAPI/v1r gateways support reads
+        locally (writes need v1r and otherwise fail with 503); Basic LAN
+        without cloud exposes neither reads nor writes locally.
         """
-        if self._cloud_control_configured:
-            return True
         gw = self.gateways.get(gateway_id)
-        if gw is None:
-            return False
-        if gw.cloud_mode or gw.fleetapi:
+        if gw is not None and (gw.cloud_mode or gw.fleetapi):
             return True
-        if gw.basic_lan:
-            return False
-        return bool(gw.host)
+        if gw is not None and gw.basic_lan:
+            return gw.id in self._cloud_control_gateway_ids
+        if gw is not None and gw.rsa_key_configured:
+            return True
+        if gw is not None and gw.host:
+            # Plain TEDAPI (Wi-Fi) — reads work locally, writes do not.
+            # Capability for the Console/HA card is write-capability.
+            return gw.id in self._cloud_control_gateway_ids
+        if self._cloud_control_configured:
+            # Fallback for callers that pass an unknown id but hybrid is
+            # configured (single-site setups with default gateway aliasing).
+            return True
+        return False
 
     def cloud_link_status(self) -> Optional[Dict[str, Any]]:
         """Per-link health for the shared hybrid cloud-control connection (#87).

@@ -632,16 +632,21 @@ class MqttPublisher:
         """
         from app.config import settings
         from app.core.gateway_manager import gateway_manager
+        from app.models.gateway import GRID_EXPORT_MODES
 
         prefix = settings.mqtt_topic_prefix.rstrip("/")
         valid_modes = {"self_consumption", "backup", "autonomous"}
-        valid_export = {"battery_ok", "pv_only", "never"}
+        valid_export = set(GRID_EXPORT_MODES)
 
         try:
             # aiomqtt>=2.3 message stream (there is no delivered_messages API).
             async with client.messages() as messages:
                 async for message in messages:
                     if self._shutdown or not settings.control_enabled:
+                        continue
+                    # Ignore retained replays — a retained .../set would re-execute
+                    # the last command on every reconnect and is never intended.
+                    if getattr(message, "retain", False):
                         continue
                     try:
                         topic = str(message.topic.value if hasattr(message.topic, "value") else message.topic)
@@ -663,11 +668,7 @@ class MqttPublisher:
                         continue
                     gw_id, command = parts[0], parts[1]
                     if gw_id not in gateway_manager.gateways:
-                        # Unknown gateway — try default if single gateway
-                        if "default" in gateway_manager.gateways:
-                            gw_id = "default"
-                        else:
-                            continue
+                        continue
                     # Same capability gate as Console + HA discovery, but only
                     # for grid commands: reserve/mode keep working through
                     # local_control on gateways without grid support.
