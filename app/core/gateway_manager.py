@@ -981,6 +981,30 @@ class GatewayManager:
             except (asyncio.TimeoutError, Exception) as e:
                 logger.debug(f"Grid export not available for {gateway_id}: {e}")
 
+        # Grid charging/export reads on the local TEDAPI connection (reads
+        # need no v1r; writes do and otherwise fail with 503). Hybrid and
+        # cloud gateways are covered above via their cloud connections;
+        # Basic LAN exposes neither locally.
+        if not basic_lan and gateway and not (gateway.cloud_mode or gateway.fleetapi):
+            try:
+                local_gc = await asyncio.wait_for(
+                    loop.run_in_executor(self._executor, pw.get_grid_charging),
+                    timeout=step_timeout,
+                )
+                if isinstance(local_gc, bool):
+                    data.grid_charging = local_gc
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.debug(f"Grid charging not available locally for {gateway_id}: {e}")
+            try:
+                local_ge = await asyncio.wait_for(
+                    loop.run_in_executor(self._executor, pw.get_grid_export),
+                    timeout=step_timeout,
+                )
+                if isinstance(local_ge, str) and local_ge in ("battery_ok", "pv_only", "never"):
+                    data.grid_export = local_ge
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.debug(f"Grid export not available locally for {gateway_id}: {e}")
+
         # Try to get fan speeds for /fans endpoint (TEDAPI only)
         # get_fan_speeds() lives on the TEDAPI client (pw.tedapi),
         # not on the top-level Powerwall object itself
@@ -1806,6 +1830,25 @@ class GatewayManager:
         except Exception as e:
             logger.warning(f"[{gateway_id}] call_api({method}) error: {e}")
             return None
+
+    def gateway_grid_capable(self, gateway_id: str) -> bool:
+        """Whether grid charging/export controls can work for a gateway.
+
+        True with hybrid cloud control, on cloud/FleetAPI gateways, or on
+        local TEDAPI/v1r gateways (reads work locally; writes need v1r and
+        otherwise fail with 503). Basic LAN without cloud exposes neither
+        reads nor writes locally.
+        """
+        if self._cloud_control_configured:
+            return True
+        gw = self.gateways.get(gateway_id)
+        if gw is None:
+            return False
+        if gw.cloud_mode or gw.fleetapi:
+            return True
+        if gw.basic_lan:
+            return False
+        return bool(gw.host)
 
     def cloud_link_status(self) -> Optional[Dict[str, Any]]:
         """Per-link health for the shared hybrid cloud-control connection (#87).

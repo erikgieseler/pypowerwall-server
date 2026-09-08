@@ -137,12 +137,13 @@ async def control_status():
     to know *whether* to show the Control card without learning the token.
     All actual writes stay behind ``verify_control_token``.
     """
-    gw_cloud = any(
-        g.cloud_mode or g.fleetapi for g in gateway_manager.gateways.values()
+    grid_available = any(
+        gateway_manager.gateway_grid_capable(gid)
+        for gid in gateway_manager.gateways
     )
     return {
         "enabled": settings.control_enabled,
-        "grid_available": bool(gateway_manager.cloud_link_status()) or gw_cloud,
+        "grid_available": grid_available,
     }
 
 

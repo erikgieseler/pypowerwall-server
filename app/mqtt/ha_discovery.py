@@ -82,6 +82,7 @@ def build_discovery_payloads(
     ha_prefix: str,
     version: Optional[str] = None,
     string_ids: Optional[Sequence[str]] = None,
+    grid_available: bool = True,
 ) -> list[tuple[str, str]]:
     """Build all HA auto-discovery (topic, payload) pairs for a gateway.
 
@@ -96,6 +97,9 @@ def build_discovery_payloads(
                        ["A1", "B1", …, "F2"] for a multi-PW3 setup).  When
                        provided, per-string and paired-rollup sensors are added
                        to the discovery payloads so HA auto-discovers them.
+        grid_available: Whether this gateway supports grid charging/export
+                       control (same capability as the Console card). Grid
+                       entities are only advertised when True.
 
     Returns:
         List of (topic, json_payload_str) tuples, one per sensor/binary sensor.
@@ -455,29 +459,31 @@ def build_discovery_payloads(
                     "mdi:cog",
                 )
             )
-            # Grid charging as switch (ON/OFF ↔ true/false)
-            results.append(
-                switch_entity(
-                    "grid_charging_control",
-                    "Grid Charging",
-                    f"{data_prefix}/grid_charging",
-                    f"{data_prefix}/grid_charging/set",
-                    "ON",
-                    "OFF",
-                    "mdi:transmission-tower",
+            # Grid charging as switch (ON/OFF ↔ true/false) — only where
+            # the gateway actually supports it (same gate as the Console).
+            if grid_available:
+                results.append(
+                    switch_entity(
+                        "grid_charging_control",
+                        "Grid Charging",
+                        f"{data_prefix}/grid_charging",
+                        f"{data_prefix}/grid_charging/set",
+                        "ON",
+                        "OFF",
+                        "mdi:transmission-tower",
+                    )
                 )
-            )
-            # Grid export as select
-            results.append(
-                select_entity(
-                    "grid_export_control",
-                    "Grid Export",
-                    f"{data_prefix}/grid_export",
-                    f"{data_prefix}/grid_export/set",
-                    ["battery_ok", "pv_only", "never"],
-                    "mdi:transmission-tower-export",
+                # Grid export as select
+                results.append(
+                    select_entity(
+                        "grid_export_control",
+                        "Grid Export",
+                        f"{data_prefix}/grid_export",
+                        f"{data_prefix}/grid_export/set",
+                        ["battery_ok", "pv_only", "never"],
+                        "mdi:transmission-tower-export",
+                    )
                 )
-            )
     except Exception:
         pass
 

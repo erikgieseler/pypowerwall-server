@@ -170,6 +170,8 @@ class MqttPublisher:
             if status.data and status.data.strings and isinstance(status.data.strings, dict):
                 string_ids = list(status.data.strings.keys())
 
+            from app.core.gateway_manager import gateway_manager
+
             payloads = build_discovery_payloads(
                 gateway_id=gateway_id,
                 gateway_name=gateway_name,
@@ -177,6 +179,7 @@ class MqttPublisher:
                 ha_prefix=settings.mqtt_ha_prefix,
                 version=version,
                 string_ids=string_ids,
+                grid_available=gateway_manager.gateway_grid_capable(gateway_id),
             )
             for topic, payload in payloads:
                 await self._safe_publish(topic, payload, retain=True, qos=settings.mqtt_qos)
@@ -665,6 +668,13 @@ class MqttPublisher:
                             gw_id = "default"
                         else:
                             continue
+                    # Same capability gate as Console + HA discovery, but only
+                    # for grid commands: reserve/mode keep working through
+                    # local_control on gateways without grid support.
+                    if command in ("grid_charging", "grid_export") and not gateway_manager.gateway_grid_capable(
+                        gw_id
+                    ):
+                        continue
 
                     try:
                         if command == "reserve":

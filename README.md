@@ -712,7 +712,9 @@ followed by sequential `grid_charging` / `grid_export` writes if changed.
 Controls the default gateway. When `MQTT_HOST` is set, the same 4 controls are
 also exposed in Home Assistant via MQTT (`number` for reserve, `select` for
 mode, `switch` for grid charging, `select` for grid export) on own
-`…/set` command topics.
+`…/set` command topics. Note: anyone with MQTT publish rights on these
+command topics can control the Powerwall — restrict broker access (auth, ACLs,
+TLS) accordingly.
 
 ### Data Aggregation Strategy
 Multi-gateway aggregation uses **smart aggregation** that will evolve over time:

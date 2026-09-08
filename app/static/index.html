@@ -3310,12 +3310,17 @@
         // Which fields differ from the server state. With a null initial
         // state (values not loaded yet) only fields the user actually
         // touched count as changed — never send an untouched HTML default.
+        // Same when the server reports a value our controls cannot represent
+        // (e.g. mode "off_grid" has no select option): only an explicit
+        // user choice counts, never the fallback selection.
+        const CONTROL_MODE_OPTIONS = ['self_consumption', 'backup', 'autonomous'];
+        const CONTROL_EXPORT_OPTIONS = ['battery_ok', 'pv_only', 'never'];
         function controlChanges() {
             const modeVal = document.getElementById('control-mode')?.value;
             const reserveVal = parseInt(document.getElementById('control-reserve-number')?.value, 10);
             const gcVal = document.getElementById('control-grid-charging')?.checked || false;
             const geVal = document.getElementById('control-grid-export')?.value;
-            const mChanged = controlInitial.mode === null
+            const mChanged = (controlInitial.mode === null || !CONTROL_MODE_OPTIONS.includes(controlInitial.mode))
                 ? controlTouched.mode
                 : modeVal !== controlInitial.mode;
             const rChanged = controlInitial.reserve === null
@@ -3324,7 +3329,7 @@
             const gcChanged = controlInitial.grid_charging === null
                 ? controlTouched.grid_charging
                 : gcVal !== controlInitial.grid_charging;
-            const geChanged = controlInitial.grid_export === null
+            const geChanged = (controlInitial.grid_export === null || !CONTROL_EXPORT_OPTIONS.includes(controlInitial.grid_export))
                 ? controlTouched.grid_export
                 : geVal !== controlInitial.grid_export;
             return { modeVal, reserveVal, gcVal, geVal, mChanged, rChanged, gcChanged, geChanged };
@@ -3467,7 +3472,7 @@
             }
             setControlToken(token);
             const { modeVal, reserveVal, gcVal, geVal, mChanged, rChanged, gcChanged, geChanged } = controlChanges();
-            if (!['self_consumption', 'backup', 'autonomous'].includes(modeVal)) {
+            if (!CONTROL_MODE_OPTIONS.includes(modeVal)) {
                 setControlMessage('That mode is unknown.', 'error');
                 return;
             }
@@ -3475,7 +3480,7 @@
                 setControlMessage('Reserve must be 0–100.', 'error');
                 return;
             }
-            if (geChanged && !['battery_ok', 'pv_only', 'never'].includes(geVal)) {
+            if (geChanged && !CONTROL_EXPORT_OPTIONS.includes(geVal)) {
                 setControlMessage('Grid export mode is unknown.', 'error');
                 return;
             }
