@@ -829,11 +829,33 @@ class GatewayManager:
             except (asyncio.TimeoutError, Exception) as e:
                 logger.debug(f"Site name not available for {gateway_id}: {e}")
 
-        # Detect PW3 status from pypowerwall TEDAPI connection
+        # Detect PW3 status: prefer hardware type from TEDAPI config
+        # (v1r transport reports pw3 True even for PW2). Check current
+        # config, then last cached config to avoid a one-poll flash of
+        # "(PW3)" on cold start; if hardware still unknown, leave pw3
+        # as None so the UI shows generic "TEDAPI v1r" without suffix.
         try:
             if hasattr(pw, "tedapi") and pw.tedapi:
                 pw3_status = getattr(pw.tedapi, "pw3", None)
-                if pw3_status is not None:
+                hw_pw3 = None
+                cfg = getattr(data, "tedapi_config", None)
+                if not isinstance(cfg, dict) or not (cfg.get("battery_blocks") or []):
+                    prev = self._last_successful_data.get(gateway_id)
+                    cfg = getattr(prev, "tedapi_config", None) if prev else None
+                if isinstance(cfg, dict):
+                    blks = cfg.get("battery_blocks") or []
+                    if isinstance(blks, list) and blks:
+                        hw_pw3 = any(
+                            b.get("type") in ("Powerwall3", "Powerwall3Follower", "LFPV")
+                            for b in blks
+                            if isinstance(b, dict)
+                        )
+                if hw_pw3 is not None:
+                    data.pw3 = bool(hw_pw3)
+                elif cfg is None and pw3_status is not None:
+                    # hardware still unknown (cold start) -> leave as None
+                    pass
+                elif pw3_status is not None:
                     data.pw3 = bool(pw3_status)
                 # Also cache tedapi_mode
                 if hasattr(pw, "tedapi_mode"):
