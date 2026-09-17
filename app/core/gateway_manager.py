@@ -829,53 +829,13 @@ class GatewayManager:
             except (asyncio.TimeoutError, Exception) as e:
                 logger.debug(f"Site name not available for {gateway_id}: {e}")
 
-        # Detect PW3 status: prefer hardware type from TEDAPI config
-        # (v1r transport reports pw3 True even for PW2). Check current
-        # config, then last cached config to avoid a one-poll flash of
-        # "(PW3)" on cold start. Preserve non-v1r transport PW3 flag;
-        # only v1r stays unknown (None) until hardware config arrives.
+        # Cache tedapi_mode and raw pw3 flag; hardware-based pw3 is
+        # resolved after tedapi_config is fetched below to avoid a
+        # one-poll flash of "(PW3)" on v1r cold start.
+        _raw_pw3_status = None
         try:
             if hasattr(pw, "tedapi") and pw.tedapi:
-                pw3_status = getattr(pw.tedapi, "pw3", None)
-                hw_pw3 = None
-                cfg = getattr(data, "tedapi_config", None)
-                if not isinstance(cfg, dict) or not (cfg.get("battery_blocks") or []):
-                    prev = self._last_successful_data.get(gateway_id)
-                    cfg = getattr(prev, "tedapi_config", None) if prev else None
-                if isinstance(cfg, dict):
-                    blks = cfg.get("battery_blocks") or []
-                    if isinstance(blks, list) and blks:
-                        is_pw3_type = any(
-                            "Powerwall3" in (b.get("type") or "") or b.get("type") == "LFPV"
-                            for b in blks
-                            if isinstance(b, dict)
-                        )
-                        is_pw3_pn = any(
-                            str(
-                                b.get("PackagePartNumber")
-                                or b.get("partNumber")
-                                or b.get("PartNumber")
-                                or ""
-                            ).startswith("1707000")
-                            for b in blks
-                            if isinstance(b, dict)
-                        )
-                        if is_pw3_type or is_pw3_pn:
-                            hw_pw3 = True
-                        else:
-                            hw_pw3 = False
-                if hw_pw3 is not None:
-                    data.pw3 = bool(hw_pw3)
-                elif hw_pw3 is None and pw3_status is not None:
-                    # hardware still unknown (cold start) -> keep unknown
-                    # only for v1r; non-v1r keeps transport-based flag
-                    gw = self.gateways.get(gateway_id)
-                    is_v1r = bool(gw and gw.rsa_key_configured)
-                    if not is_v1r:
-                        data.pw3 = bool(pw3_status)
-                elif pw3_status is not None:
-                    data.pw3 = bool(pw3_status)
-                # Also cache tedapi_mode
+                _raw_pw3_status = getattr(pw.tedapi, "pw3", None)
                 if hasattr(pw, "tedapi_mode"):
                     data.tedapi_mode = pw.tedapi_mode
         except Exception:
@@ -894,6 +854,48 @@ class GatewayManager:
                     data.tedapi_config = tedapi_config
         except (asyncio.TimeoutError, Exception) as e:
             logger.debug(f"TEDAPI config not available for {gateway_id}: {e}")
+
+        # Resolve pw3 from hardware config when available; for v1r keep
+        # unknown (None) until hardware arrives to avoid flash.
+        try:
+            hw_pw3 = None
+            cfg = getattr(data, "tedapi_config", None)
+            if not isinstance(cfg, dict) or not (cfg.get("battery_blocks") or []):
+                prev = self._last_successful_data.get(gateway_id)
+                cfg = getattr(prev, "tedapi_config", None) if prev else None
+            if isinstance(cfg, dict):
+                blks = cfg.get("battery_blocks") or []
+                if isinstance(blks, list) and blks:
+                    is_pw3_type = any(
+                        "Powerwall3" in (b.get("type") or "") or b.get("type") == "LFPV"
+                        for b in blks
+                        if isinstance(b, dict)
+                    )
+                    is_pw3_pn = any(
+                        str(
+                            b.get("PackagePartNumber")
+                            or b.get("partNumber")
+                            or b.get("PartNumber")
+                            or ""
+                        ).startswith("1707000")
+                        for b in blks
+                        if isinstance(b, dict)
+                    )
+                    if is_pw3_type or is_pw3_pn:
+                        hw_pw3 = True
+                    else:
+                        hw_pw3 = False
+            if hw_pw3 is not None:
+                data.pw3 = bool(hw_pw3)
+            elif hw_pw3 is None and _raw_pw3_status is not None:
+                gw = self.gateways.get(gateway_id)
+                is_v1r = bool(gw and gw.rsa_key_configured)
+                if not is_v1r:
+                    data.pw3 = bool(_raw_pw3_status)
+            elif _raw_pw3_status is not None:
+                data.pw3 = bool(_raw_pw3_status)
+        except Exception:
+            pass
 
         # Try to get grid status (for caching)
         try:
