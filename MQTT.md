@@ -271,7 +271,7 @@ Binary sensors:
 |--------|----------------|
 | Gateway Online | `connectivity` |
 | Grid Connected | `connectivity` |
-| Grid Charging | `battery_charging` |
+| Grid Charging | — |
 
 ---
 

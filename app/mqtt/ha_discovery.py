@@ -357,7 +357,7 @@ def build_discovery_payloads(
             f"{data_prefix}/grid_charging",
             payload_on="true",
             payload_off="false",
-            device_class="battery_charging",
+            device_class=None,
             icon="mdi:battery-charging-outline",
         ),
         # --- Text sensor: grid export policy ---
