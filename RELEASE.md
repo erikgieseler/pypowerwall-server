@@ -5,7 +5,7 @@
 ### [0.6.7] - Upcoming
 
 **Added:**
-- **MQTT HA sensors for grid & backup —** four Home Assistant auto-discovery sensors: `grid_connected` (binary `connectivity`, derived from `grid_status=="UP"`), `grid_charging` (binary, generic `An`/`Aus`), `grid_export` (`battery_ok`/`pv_only`/`never`), and `time_remaining` (`h` / `duration`) — all published under `{prefix}/{gw}/` and included in the `status` summary JSON; `MQTT.md` updated and old `Grid Connected` doc placeholder restored as real sensor.
+- **MQTT HA sensors for grid & backup —** four Home Assistant auto-discovery sensors: `grid_connected` (binary `connectivity`, derived from `grid_status=="UP"`), `grid_charging` (binary, generic `On`/`Off`), `grid_export` (`battery_ok`/`pv_only`/`never`), and `time_remaining` (`h` / `duration`) — all published under `{prefix}/{gw}/` and included in the `status` summary JSON; `MQTT.md` updated and old `Grid Connected` doc placeholder restored as real sensor.
 
 ### [0.6.6] - 2026-09-13
 
