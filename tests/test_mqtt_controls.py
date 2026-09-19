@@ -29,7 +29,7 @@ def test_controls_disabled_no_extra_entities():
 
 
 def test_controls_enabled_adds_six_entities():
-    # Without PW3 v1r: 4 controls (no islanding) → 23+4=27
+    # Without PW3 v1r: 4 controls (no islanding)
     results = build_discovery_payloads(
         gateway_id="home",
         gateway_name="Home",
@@ -46,7 +46,7 @@ def test_controls_enabled_adds_six_entities():
     assert "homeassistant/select/pypowerwall_home_grid_export_control/config" in topics
     assert "homeassistant/button/pypowerwall_home_go_off_grid/config" not in topics
 
-    # With PW3 v1r: +2 islanding buttons → 23+6=29
+    # With PW3 v1r: +2 islanding buttons
     results_v1r = build_discovery_payloads(
         gateway_id="home",
         gateway_name="Home",
