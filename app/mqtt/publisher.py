@@ -43,6 +43,10 @@ Topic layout
     {prefix}/{gateway_id}/total_capacity  int    — total battery capacity (Wh)
     {prefix}/{gateway_id}/current_charge  int    — current battery charge (Wh)
     {prefix}/{gateway_id}/online          str    — "true" | "false"
+    {prefix}/{gateway_id}/grid_connected  str    — "true" | "false" (true when grid_status=="UP")
+    {prefix}/{gateway_id}/grid_charging   str    — "true" | "false" (grid charging allowed)
+    {prefix}/{gateway_id}/grid_export     str    — "battery_ok" | "pv_only" | "never"
+    {prefix}/{gateway_id}/time_remaining  float  — hours of backup remaining
     {prefix}/{gateway_id}/aggregates      JSON   — full aggregates dict
     {prefix}/{gateway_id}/status          JSON   — summary dict
     {prefix}/{gateway_id}/availability    str    — "online" | "offline" (LWT)
@@ -169,6 +173,19 @@ class MqttPublisher:
             if status.data and status.data.strings and isinstance(status.data.strings, dict):
                 string_ids = list(status.data.strings.keys())
 
+            # Islanding like WebGUI auto-hide — PW3 v1r only (rsa_key_configured + pw3 True)
+            is_pv3_v1r = False
+            try:
+                if (
+                    status.gateway
+                    and getattr(status.gateway, "rsa_key_configured", False)
+                    and status.data
+                    and status.data.pw3 is True
+                ):
+                    is_pv3_v1r = True
+            except Exception:
+                is_pv3_v1r = False
+
             payloads = build_discovery_payloads(
                 gateway_id=gateway_id,
                 gateway_name=gateway_name,
@@ -176,6 +193,8 @@ class MqttPublisher:
                 ha_prefix=settings.mqtt_ha_prefix,
                 version=version,
                 string_ids=string_ids,
+                controls_enabled=settings.mqtt_controls_available,
+                is_pv3_v1r=is_pv3_v1r,
             )
             for topic, payload in payloads:
                 await self._safe_publish(topic, payload, retain=True, qos=settings.mqtt_qos)
@@ -325,6 +344,12 @@ class MqttPublisher:
                         str(data.grid_status),
                         retain, qos,
                     )
+                    # Derived binary: grid_connected = true only when UP, else false (incl. unknown/SYNCING)
+                    await self._safe_publish(
+                        f"{prefix}/grid_connected",
+                        "true" if data.grid_status == "UP" else "false",
+                        retain, qos,
+                    )
 
                 if data.mode is not None:
                     await self._safe_publish(
@@ -339,6 +364,28 @@ class MqttPublisher:
                 if data.version is not None:
                     await self._safe_publish(
                         f"{prefix}/version", str(data.version), retain, qos
+                    )
+
+                if data.grid_charging is not None:
+                    await self._safe_publish(
+                        f"{prefix}/grid_charging",
+                        "true" if data.grid_charging else "false",
+                        retain, qos,
+                    )
+
+                if data.grid_export is not None:
+                    await self._safe_publish(
+                        f"{prefix}/grid_export",
+                        str(data.grid_export),
+                        retain, qos,
+                    )
+
+                if data.time_remaining is not None:
+                    # Topic rounded to 2 decimals for HA; summary JSON keeps raw precision
+                    await self._safe_publish(
+                        f"{prefix}/time_remaining",
+                        f"{float(data.time_remaining):.2f}",
+                        retain, qos,
                     )
 
                 # Solar string topics (voltage, current, power per string)
@@ -428,9 +475,13 @@ class MqttPublisher:
                     "home": home if data.aggregates else None,
                     "powerwall": pw_power if data.aggregates else None,
                     "grid_status": data.grid_status,
+                    "grid_connected": (data.grid_status == "UP") if data.grid_status is not None else None,
                     "mode": data.mode,
                     "reserve": data.reserve,
                     "version": data.version,
+                    "grid_charging": data.grid_charging,
+                    "grid_export": data.grid_export,
+                    "time_remaining": data.time_remaining,
                 }
                 await self._safe_publish(
                     f"{prefix}/status", json.dumps(summary), retain, qos
@@ -553,12 +604,39 @@ class MqttPublisher:
                         retain=True, qos=settings.mqtt_qos,
                     )
 
+                    # Subscribe to control command topics if controls are enabled (broker-trust, no token in payload).
+                    # Topic pattern: {prefix}/{gateway_id}/control/{control}/set  e.g. pypowerwall/home/control/reserve/set
+                    control_task = None
+                    if settings.mqtt_controls_available:
+                        try:
+                            await client.subscribe(
+                                f"{settings.mqtt_topic_prefix}/+/control/+/set", qos=1
+                            )
+                            logger.info(
+                                "MQTT controls subscribed to %s/+/control/+/set",
+                                settings.mqtt_topic_prefix,
+                            )
+                            control_task = asyncio.create_task(
+                                self._control_message_loop(client),
+                                name="mqtt-control-handler",
+                            )
+                        except Exception as e:
+                            logger.warning(f"MQTT control subscribe failed: {e}")
+
                     # Inner heartbeat loop: stays alive until a publish failure
                     # sets _connected=False, or until shutdown is requested.
                     # The 5-second sleep matches the default poll interval so we
                     # detect disconnect promptly without busy-waiting.
-                    while self._connected and not self._shutdown:
-                        await asyncio.sleep(5)
+                    try:
+                        while self._connected and not self._shutdown:
+                            await asyncio.sleep(5)
+                    finally:
+                        if control_task and not control_task.done():
+                            control_task.cancel()
+                            try:
+                                await control_task
+                            except asyncio.CancelledError:
+                                pass
 
                     # If we exited the inner loop due to a publish failure
                     # (not shutdown), let the context manager close cleanly then
@@ -585,6 +663,166 @@ class MqttPublisher:
         self._connected = False
         self._client = None
 
+    async def _control_message_loop(self, client) -> None:
+        """Handle incoming HA control commands via MQTT (broker-trust, no token).
+
+        Subscribes to ``{prefix}/+/control/+/set`` after connect.  Each message
+        is validated (type/range/allowlist) and routed to ``gateway_manager``
+        via the same ``cloud_control``/``local_control`` paths as the HTTP
+        ``POST /control/*`` endpoints (write_lock, timeout, islanding cooldown).
+        ``PW_CONTROL_SECRET`` is never read from the payload — trust comes from
+        broker authentication (``MQTT_USERNAME``/``PASSWORD`` + optional ``MQTT_TLS``)
+        and ACL ``pypowerwall/+/control/#``.
+
+        Retained ``.../control/+/set`` publishes are ignored (``retain=false``
+        is expected from HA).
+        """
+        try:
+            import json as _json
+
+            from app.core.gateway_manager import gateway_manager
+
+            async for message in client.messages:
+                # Ignore retained replays of old commands after reconnect
+                try:
+                    is_retained = bool(getattr(message, "retain", False))
+                except Exception:
+                    is_retained = False
+                if is_retained:
+                    continue
+
+                try:
+                    topic = message.topic.value if hasattr(message.topic, "value") else str(message.topic)
+                    raw_payload = message.payload.decode() if isinstance(message.payload, (bytes, bytearray)) else str(message.payload)
+                except Exception as e:
+                    logger.debug(f"MQTT control message decode failed: {e}")
+                    continue
+
+                # Topic: {prefix}/{gateway_id}/control/{control}/set
+                try:
+                    from app.config import settings as _settings
+
+                    prefix = _settings.mqtt_topic_prefix
+                    parts = topic.split("/")
+                    # Expect 5 parts: prefix / gw / control / ctrl / set
+                    if len(parts) != 5 or parts[0] != prefix or parts[2] != "control" or parts[4] != "set":
+                        continue
+                    gateway_id = parts[1]
+                    control = parts[3]
+                except Exception:
+                    continue
+
+                # Validate gateway exists
+                gw = gateway_manager.gateways.get(gateway_id)
+                if not gw:
+                    logger.debug(f"MQTT control: unknown gateway '{gateway_id}'")
+                    continue
+                if not gw.online and control not in ("reserve", "mode", "grid_charging", "grid_export", "islanding"):
+                    # Still allow command — gateway_manager will handle offline fast-fail
+                    pass
+
+                # Parse JSON payload
+                try:
+                    payload = _json.loads(raw_payload) if raw_payload else {}
+                    if not isinstance(payload, dict):
+                        raise ValueError("payload not a dict")
+                except Exception as e:
+                    logger.debug(f"MQTT control {gateway_id}/{control} bad JSON '{raw_payload}': {e}")
+                    continue
+
+                # Route to gateway_manager (broker-trust, no token check)
+                try:
+                    result = None
+                    if control == "reserve":
+                        val = payload.get("value")
+                        if not isinstance(val, int) or not 0 <= val <= 100:
+                            logger.debug(f"MQTT control reserve invalid value '{val}' for {gateway_id}")
+                            continue
+                        # Hybrid: cloud_control for TEDAPI, else local
+                        if gateway_manager._cloud_control:
+                            result = await gateway_manager.cloud_control("set_reserve", val, timeout=10.0)
+                            if result is None:
+                                result = await gateway_manager.local_control(gateway_id, "set_reserve", val, timeout=10.0)
+                        else:
+                            result = await gateway_manager.local_control(gateway_id, "set_reserve", val, timeout=10.0)
+                            if result is None:
+                                result = await gateway_manager.cloud_control("set_reserve", val, timeout=10.0)
+
+                    elif control == "mode":
+                        val = payload.get("value")
+                        if val not in ("self_consumption", "backup", "autonomous"):
+                            logger.debug(f"MQTT control mode invalid '{val}' for {gateway_id}")
+                            continue
+                        if gateway_manager._cloud_control:
+                            result = await gateway_manager.cloud_control("set_mode", val, timeout=10.0)
+                            if result is None:
+                                result = await gateway_manager.local_control(gateway_id, "set_mode", val, timeout=10.0)
+                        else:
+                            result = await gateway_manager.local_control(gateway_id, "set_mode", val, timeout=10.0)
+                            if result is None:
+                                result = await gateway_manager.cloud_control("set_mode", val, timeout=10.0)
+
+                    elif control == "grid_charging":
+                        val = payload.get("value")
+                        if not isinstance(val, bool):
+                            logger.debug(f"MQTT control grid_charging invalid '{val}' for {gateway_id}")
+                            continue
+                        if gateway_manager._cloud_control:
+                            result = await gateway_manager.cloud_control("set_grid_charging", val, timeout=10.0)
+                            if result is None:
+                                result = await gateway_manager.local_control(gateway_id, "set_grid_charging", val, timeout=10.0)
+                        else:
+                            result = await gateway_manager.local_control(gateway_id, "set_grid_charging", val, timeout=10.0)
+                            if result is None:
+                                result = await gateway_manager.cloud_control("set_grid_charging", val, timeout=10.0)
+
+                    elif control == "grid_export":
+                        val = payload.get("value")
+                        if val not in ("battery_ok", "pv_only", "never"):
+                            logger.debug(f"MQTT control grid_export invalid '{val}' for {gateway_id}")
+                            continue
+                        if gateway_manager._cloud_control:
+                            result = await gateway_manager.cloud_control("set_grid_export", val, timeout=10.0)
+                            if result is None:
+                                result = await gateway_manager.local_control(gateway_id, "set_grid_export", val, timeout=10.0)
+                        else:
+                            result = await gateway_manager.local_control(gateway_id, "set_grid_export", val, timeout=10.0)
+                            if result is None:
+                                result = await gateway_manager.cloud_control("set_grid_export", val, timeout=10.0)
+
+                    elif control == "islanding":
+                        action = payload.get("action")
+                        confirm = payload.get("confirm")
+                        if action not in ("off_grid", "on_grid") or confirm is not True:
+                            logger.debug(f"MQTT control islanding invalid payload '{payload}' for {gateway_id}")
+                            continue
+                        if action == "off_grid":
+                            try:
+                                result = await gateway_manager.local_control(gateway_id, "go_off_grid", True, timeout=15.0)
+                            except Exception as e:
+                                # Islanding cooldown / in-progress errors bubble as exceptions
+                                logger.warning(f"MQTT islanding off_grid failed for {gateway_id}: {e}")
+                                result = None
+                        else:
+                            try:
+                                result = await gateway_manager.local_control(gateway_id, "reconnect_grid", timeout=15.0)
+                            except Exception as e:
+                                logger.warning(f"MQTT islanding on_grid failed for {gateway_id}: {e}")
+                                result = None
+                    else:
+                        logger.debug(f"MQTT control unknown control '{control}' for {gateway_id}")
+                        continue
+
+                    if result is not None:
+                        logger.info(f"MQTT control {control} for {gateway_id} applied via HA")
+                    else:
+                        logger.debug(f"MQTT control {control} for {gateway_id} returned no result (offline/unsupported)")
+                except Exception as e:
+                    logger.warning(f"MQTT control handler error for {gateway_id}/{control}: {e}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"MQTT control message loop exited: {e}")
 
 def _safe_float(val) -> Optional[float]:
     """Convert a value to float, returning None on failure."""
