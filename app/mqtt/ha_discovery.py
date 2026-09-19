@@ -48,7 +48,7 @@ Text sensors:
 Binary sensor:
     online      — Gateway connection status
     grid_connected — Grid connected (true when grid_status=="UP", device_class=connectivity)
-    grid_charging — Grid charging allowed (true/false, device_class=battery_charging)
+    grid_charging — Grid charging allowed (true/false, generic On/Off)
 
 Numeric sensors:
     time_remaining — Backup time remaining (h, device_class=duration)
