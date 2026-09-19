@@ -6,7 +6,6 @@
 
 **Added:**
 - **MQTT HA sensors for grid & backup —** four Home Assistant auto-discovery sensors: `grid_connected` (binary `connectivity`, derived from `grid_status=="UP"`), `grid_charging` (binary, generic `On`/`Off`), `grid_export` (`battery_ok`/`pv_only`/`never`), and `time_remaining` (`h` / `duration`) — all published under `{prefix}/{gw}/` and included in the `status` summary JSON; `MQTT.md` updated and old `Grid Connected` doc placeholder restored as real sensor.
-- **MQTT HA controls via broker-trust (opt-in `MQTT_CONTROLS_ENABLED=yes` + `PW_CONTROL_SECRET`) —** six Home Assistant control entities via autodiscovery: `reserve` (`number` 0-100 %), `mode` (`select` 3), `grid_charging` (`switch`), `grid_export` (`select` 3), `Go Off Grid`/`Reconnect Grid` (`button` 2×, PW3 v1r-only) on `pypowerwall/{gw}/control/+/set` (`retain=false`, `PW_CONTROL_SECRET` never in payload, broker ACL `pypowerwall/+/control/#`).
 
 ### [0.6.6] - 2026-09-13
 
