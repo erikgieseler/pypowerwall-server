@@ -29,22 +29,36 @@ def test_controls_disabled_no_extra_entities():
 
 
 def test_controls_enabled_adds_six_entities():
+    # Without PW3 v1r: 4 controls (no islanding)
     results = build_discovery_payloads(
         gateway_id="home",
         gateway_name="Home",
         topic_prefix="pypowerwall",
         ha_prefix="homeassistant",
         controls_enabled=True,
+        is_pv3_v1r=False,
     )
-    # 23 sensors + 6 controls = 29
-    assert len(results) == 29
+    assert len(results) == 27
     topics = {t for t, _ in results}
     assert "homeassistant/number/pypowerwall_home_reserve_control/config" in topics
     assert "homeassistant/select/pypowerwall_home_mode_control/config" in topics
     assert "homeassistant/switch/pypowerwall_home_grid_charging_control/config" in topics
     assert "homeassistant/select/pypowerwall_home_grid_export_control/config" in topics
-    assert "homeassistant/button/pypowerwall_home_go_off_grid/config" in topics
-    assert "homeassistant/button/pypowerwall_home_reconnect_grid/config" in topics
+    assert "homeassistant/button/pypowerwall_home_go_off_grid/config" not in topics
+
+    # With PW3 v1r: +2 islanding buttons
+    results_v1r = build_discovery_payloads(
+        gateway_id="home",
+        gateway_name="Home",
+        topic_prefix="pypowerwall",
+        ha_prefix="homeassistant",
+        controls_enabled=True,
+        is_pv3_v1r=True,
+    )
+    assert len(results_v1r) == 29
+    topics_v1r = {t for t, _ in results_v1r}
+    assert "homeassistant/button/pypowerwall_home_go_off_grid/config" in topics_v1r
+    assert "homeassistant/button/pypowerwall_home_reconnect_grid/config" in topics_v1r
 
 
 def test_reserve_control_payload():
