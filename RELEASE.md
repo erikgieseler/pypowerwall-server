@@ -2,6 +2,11 @@
 
 ## Version History
 
+### [0.6.7] - Upcoming
+
+**Fixed:**
+- **TEDAPI v1r hardware label on PW2** — `TEDAPI v1r (PW3)` was shown for `v1r` on PW2 because `pw3` reflected transport, not hardware. `pw3` is now derived from `tedapi_config` battery-block type (`Powerwall3*`/`LFPV`) or part number (`1707000*`) when available, and the Console shows `TEDAPI v1r (PW2)` vs `(PW3)` accordingly (non-`v1r` keeps transport-based flag; `v1r` stays `null` until hardware config arrives, preserving unknown as `null` in `/stats`).
+
 ### [0.6.6] - 2026-09-13
 
 **Added:**
