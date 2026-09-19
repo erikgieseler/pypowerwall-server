@@ -173,6 +173,19 @@ class MqttPublisher:
             if status.data and status.data.strings and isinstance(status.data.strings, dict):
                 string_ids = list(status.data.strings.keys())
 
+            # Islanding like WebGUI auto-hide — PW3 v1r only (rsa_key_configured + pw3 True)
+            is_pv3_v1r = False
+            try:
+                if (
+                    status.gateway
+                    and getattr(status.gateway, "rsa_key_configured", False)
+                    and status.data
+                    and status.data.pw3 is True
+                ):
+                    is_pv3_v1r = True
+            except Exception:
+                is_pv3_v1r = False
+
             payloads = build_discovery_payloads(
                 gateway_id=gateway_id,
                 gateway_name=gateway_name,
@@ -181,6 +194,7 @@ class MqttPublisher:
                 version=version,
                 string_ids=string_ids,
                 controls_enabled=settings.mqtt_controls_available,
+                is_pv3_v1r=is_pv3_v1r,
             )
             for topic, payload in payloads:
                 await self._safe_publish(topic, payload, retain=True, qos=settings.mqtt_qos)
