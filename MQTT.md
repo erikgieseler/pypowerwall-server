@@ -95,6 +95,7 @@ All use `MQTT_` prefix (no `PW_` prefix — MQTT is not a Powerwall concept).
 | `MQTT_HA_PREFIX` | `homeassistant` | HA discovery topic prefix |
 | `MQTT_CLIENT_ID` | `pypowerwall-server` | MQTT client identifier |
 | `MQTT_KEEPALIVE` | `60` | Broker keepalive interval (seconds) |
+| `MQTT_CONTROLS_ENABLED` | `no` | Enable HA control entities (reserve/mode/grid_* + islanding) via broker-trust (requires `PW_CONTROL_SECRET`) |
 
 Add to `app/config.py` Settings class:
 
@@ -114,10 +115,15 @@ mqtt_ha_discovery: bool = Field(default=True, alias="MQTT_HA_DISCOVERY")
 mqtt_ha_prefix: str = Field(default="homeassistant", alias="MQTT_HA_PREFIX")
 mqtt_client_id: str = Field(default="pypowerwall-server", alias="MQTT_CLIENT_ID")
 mqtt_keepalive: int = Field(default=60, alias="MQTT_KEEPALIVE")
+mqtt_controls_enabled: bool = Field(default=False, alias="MQTT_CONTROLS_ENABLED")
 
 @property
 def mqtt_enabled(self) -> bool:
     return bool(self.mqtt_host)
+
+@property
+def mqtt_controls_available(self) -> bool:
+    return bool(self.mqtt_host and self.mqtt_controls_enabled and self.control_secret)
 ```
 
 ---
@@ -145,6 +151,18 @@ Base path: `{MQTT_TOPIC_PREFIX}/{gateway_id}/`
 | `pypowerwall/{gw}/grid_export` | `battery_ok`/`pv_only`/`never` | — (grid export policy) |
 | `pypowerwall/{gw}/time_remaining` | `5.50` | `h` (backup time remaining, rounded 2 dp; `status` JSON keeps raw precision) |
 | `pypowerwall/{gw}/online` | `true` or `false` | — |
+
+### Control command topics (HA controls, opt-in `MQTT_CONTROLS_ENABLED=yes` + `PW_CONTROL_SECRET`, broker-trust, `retain=false`)
+
+| Topic | Payload | Notes |
+|-------|---------|-------|
+| `pypowerwall/{gw}/control/reserve/set` | `{"value": 20}` | `0-100` int, `0` = min backup |
+| `pypowerwall/{gw}/control/mode/set` | `{"value": "self_consumption"}` | `self_consumption`/`backup`/`autonomous` |
+| `pypowerwall/{gw}/control/grid_charging/set` | `{"value": true}` | `true`/`false` bool strict |
+| `pypowerwall/{gw}/control/grid_export/set` | `{"value": "battery_ok"}` | `battery_ok`/`pv_only`/`never` |
+| `pypowerwall/{gw}/control/islanding/set` | `{"action":"off_grid","confirm":true}` | `off_grid`/`on_grid` + `confirm:true`, PW3 v1r-only, 30s cooldown |
+
+`PW_CONTROL_SECRET` never sent via MQTT — controls trust broker authentication (`MQTT_USERNAME`/`PASSWORD` + optional `MQTT_TLS`) and ACL `pypowerwall/+/control/#`.
 
 ### Lifetime energy topics (Wh accumulators)
 
@@ -272,6 +290,16 @@ Binary sensors:
 | Gateway Online | `connectivity` |
 | Grid Connected | `connectivity` |
 | Grid Charging | — |
+
+Controls (opt-in `MQTT_CONTROLS_ENABLED=yes` + `PW_CONTROL_SECRET`, broker-trust, autodiscovery):
+| Entity | HA type | Options / Range | Icon |
+|--------|---------|-----------------|------|
+| Backup Reserve Control | `number` | `0-100 %` `step 1` | `mdi:battery-lock` |
+| Operation Mode Control | `select` | `self_consumption`, `backup`, `autonomous` | `mdi:cog` |
+| Grid Charging Control | `switch` | `ON` `{"value":true}` / `OFF` `{"value":false}` | `mdi:battery-charging-outline` |
+| Grid Export Control | `select` | `battery_ok`, `pv_only`, `never` | `mdi:transmission-tower-export` |
+| Go Off Grid | `button` | `{"action":"off_grid","confirm":true}` PW3 v1r-only | `mdi:transmission-tower-off` |
+| Reconnect Grid | `button` | `{"action":"on_grid","confirm":true}` PW3 v1r-only | `mdi:transmission-tower` |
 
 ---
 
@@ -410,9 +438,9 @@ Powerwall (default)
 ## Security Considerations
 
 - `MQTT_PASSWORD` is never logged or exposed in API responses
-- TLS support (`MQTT_TLS=yes`) for production broker connections
+- TLS support (`MQTT_TLS=yes`) for production broker connections (optional; `MQTT_TLS=no` `1883` LAN is supported via `MQTT_USERNAME`/`PASSWORD` + ACL)
 - `MQTT_TLS_INSECURE` defaults to `no` — must be explicitly enabled for dev
-- No MQTT subscribe / inbound command handling in this design (publish-only); control commands remain exclusively through the existing `POST /control/*` HTTP endpoints
+- Controls via MQTT use broker-trust (`MQTT_USERNAME`/`PASSWORD` + ACL `pypowerwall/+/control/#`, `retain=false`) and never send `PW_CONTROL_SECRET` in the payload; HTTP `POST /control/*` remains `Bearer <PW_CONTROL_SECRET>` protected. Without `MQTT_CONTROLS_ENABLED=yes` no `subscribe` is started (publish-only).
 
 
 ## Test Instructions - Quick Start

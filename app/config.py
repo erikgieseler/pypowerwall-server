@@ -360,11 +360,19 @@ class Settings(BaseSettings):
     mqtt_ha_prefix: str = Field(default="homeassistant", alias="MQTT_HA_PREFIX")
     mqtt_client_id: str = Field(default="pypowerwall-server", alias="MQTT_CLIENT_ID")
     mqtt_keepalive: int = Field(default=60, alias="MQTT_KEEPALIVE")
+    mqtt_controls_enabled: bool = Field(
+        default=False, alias="MQTT_CONTROLS_ENABLED"
+    )  # Opt-in MQTT controls (reserve/mode/grid_* + islanding) via broker-trust
 
     @property
     def mqtt_enabled(self) -> bool:
         """MQTT publishing is enabled when MQTT_HOST is set."""
         return bool(self.mqtt_host)
+
+    @property
+    def mqtt_controls_available(self) -> bool:
+        """MQTT controls are available when broker + controls opt-in + PW_CONTROL_SECRET are set."""
+        return bool(self.mqtt_host and self.mqtt_controls_enabled and self.control_secret)
 
     # Gateway configuration
     gateways: List[GatewayConfig] = Field(default_factory=list)
