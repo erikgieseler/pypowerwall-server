@@ -2156,7 +2156,7 @@ async def get_stats():
     tedapi = False
     basiclan = False
     cloudcontrol = False
-    pw3 = False
+    pw3 = None
     tedapi_mode = None
     siteid = None
 
@@ -2180,10 +2180,13 @@ async def get_stats():
             siteid = gw.site_id
 
         # Detect PW3 and TEDAPI mode from cached data
+        # pw3 is tri-state: True (PW3), False (known PW2), None (unknown/v1r cold start)
         status = gateway_manager.get_gateway(gateway_id)
         if status and status.data:
-            if status.data.pw3:
+            if status.data.pw3 is True:
                 pw3 = True
+            elif status.data.pw3 is False and pw3 is None:
+                pw3 = False
             if status.data.tedapi_mode:
                 tedapi_mode = status.data.tedapi_mode
 

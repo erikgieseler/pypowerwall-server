@@ -7,6 +7,9 @@
 **Added:**
 - **MQTT HA sensors for grid & backup —** four Home Assistant auto-discovery sensors: `grid_connected` (binary `connectivity`, derived from `grid_status=="UP"`), `grid_charging` (binary, generic `On`/`Off`), `grid_export` (`battery_ok`/`pv_only`/`never`), and `time_remaining` (`h` / `duration`) — all published under `{prefix}/{gw}/` and included in the `status` summary JSON; `MQTT.md` updated and old `Grid Connected` doc placeholder restored as real sensor.
 
+**Fixed:**
+- **TEDAPI v1r hardware label on PW2** — `TEDAPI v1r (PW3)` was shown for `v1r` on PW2 because `pw3` reflected transport, not hardware. `pw3` is now derived from `tedapi_config` battery-block type (`Powerwall3*`/`LFPV`) or part number (`1707000*`) when available, and the Console shows `TEDAPI v1r (PW2)` vs `(PW3)` accordingly (non-`v1r` keeps transport-based flag; `v1r` stays `null` until hardware config arrives, preserving unknown as `null` in `/stats`).
+
 ### [0.6.6] - 2026-09-13
 
 **Added:**
