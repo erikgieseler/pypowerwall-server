@@ -96,6 +96,7 @@ def build_discovery_payloads(
     version: Optional[str] = None,
     string_ids: Optional[Sequence[str]] = None,
     controls_enabled: bool = False,
+    is_pv3_v1r: bool = False,
 ) -> list[tuple[str, str]]:
     """Build all HA auto-discovery (topic, payload) pairs for a gateway.
 
@@ -112,6 +113,8 @@ def build_discovery_payloads(
                        to the discovery payloads so HA auto-discovers them.
         controls_enabled: When True, HA control entities (number/select/switch/button)
                        are added (requires MQTT_CONTROLS_ENABLED + PW_CONTROL_SECRET).
+        is_pv3_v1r:    When True, islanding buttons (Go Off Grid/Reconnect) are added
+                       (PW3 v1r-only, like WebGUI `islanding` section auto-hide).
 
     Returns:
         List of (topic, json_payload_str) tuples, one per sensor/binary sensor/control.
@@ -532,19 +535,23 @@ def build_discovery_payloads(
                 options=["battery_ok", "pv_only", "never"],
                 icon="mdi:transmission-tower-export",
             ),
-            button(
-                "go_off_grid", "Go Off Grid",
-                f"{data_prefix}/control/islanding/set",
-                '{"action":"off_grid","confirm":true}',
-                icon="mdi:transmission-tower-off",
-            ),
-            button(
-                "reconnect_grid", "Reconnect Grid",
-                f"{data_prefix}/control/islanding/set",
-                '{"action":"on_grid","confirm":true}',
-                icon="mdi:transmission-tower",
-            ),
         ])
+        # Islanding buttons like WebGUI auto-hide — PW3 v1r only
+        if is_pv3_v1r:
+            results.extend([
+                button(
+                    "go_off_grid", "Go Off Grid",
+                    f"{data_prefix}/control/islanding/set",
+                    '{"action":"off_grid","confirm":true}',
+                    icon="mdi:transmission-tower-off",
+                ),
+                button(
+                    "reconnect_grid", "Reconnect Grid",
+                    f"{data_prefix}/control/islanding/set",
+                    '{"action":"on_grid","confirm":true}',
+                    icon="mdi:transmission-tower",
+                ),
+            ])
 
     # --- Solar string sensors (per-string + paired rollups) ---
     if string_ids:
