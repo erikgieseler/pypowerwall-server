@@ -230,3 +230,49 @@ async def test_v1r_hardware_pw2_via_acpw_type():
     gateway_manager.connections["v1r-pw2"] = mock_pw
     data = await gateway_manager._fetch_gateway_data("v1r-pw2", mock_pw)
     assert data.pw3 is False
+
+
+@pytest.mark.asyncio
+async def test_v1r_hardware_pw3_via_vin_part_number():
+    """v1r with part number only in vin ("<part>--<serial>") must be PW3."""
+    gw = Gateway(
+        id="v1r-vin",
+        name="V1R VIN",
+        host="10.0.0.5",
+        gw_pwd="x",
+        rsa_key_path="/tmp/key",
+        rsa_key_configured=True,
+    )
+    gateway_manager.gateways["v1r-vin"] = gw
+    mock_pw = Mock()
+    mock_pw.poll.return_value = {
+        "site": {"instant_power": 0},
+        "solar": {"instant_power": 0},
+        "battery": {"instant_power": 0},
+        "load": {"instant_power": 0},
+    }
+    mock_pw.level.return_value = 50.0
+    mock_pw.tedapi = Mock()
+    mock_pw.tedapi.pw3 = False
+    mock_pw.tedapi.get_config.return_value = {
+        "battery_blocks": [{"type": "ACPW", "vin": "1707000-11-J--TG12xxxxxx3A8Z"}]
+    }
+    mock_pw.grid_status.return_value = "UP"
+    mock_pw.get_mode.return_value = None
+    mock_pw.get_reserve.return_value = None
+    mock_pw.get_grid_charging.return_value = None
+    mock_pw.get_grid_export.return_value = None
+    mock_pw.system_status.return_value = {}
+    mock_pw.vitals.return_value = {}
+    mock_pw.strings.return_value = {}
+    mock_pw.freq.return_value = 60.0
+    mock_pw.status.return_value = "Running"
+    mock_pw.version.return_value = "1.0"
+    mock_pw.din.return_value = "D"
+    mock_pw.uptime.return_value = "0h"
+    mock_pw.site_name.return_value = "S"
+    mock_pw.temps.return_value = {}
+    mock_pw.alerts.return_value = []
+    gateway_manager.connections["v1r-vin"] = mock_pw
+    data = await gateway_manager._fetch_gateway_data("v1r-vin", mock_pw)
+    assert data.pw3 is True

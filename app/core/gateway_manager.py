@@ -871,13 +871,22 @@ class GatewayManager:
                         for b in blks
                         if isinstance(b, dict)
                     )
-                    is_pw3_pn = any(
-                        str(
+                    def _block_part_number(b):
+                        # Explicit part-number fields first, then vin
+                        # ("<part>--<serial>", e.g. "1707000-11-J--TG..."),
+                        # which commonly carries the part in the wild.
+                        pn = (
                             b.get("PackagePartNumber")
                             or b.get("partNumber")
                             or b.get("PartNumber")
                             or ""
-                        ).startswith("1707000")
+                        )
+                        if pn:
+                            return str(pn)
+                        return str(b.get("vin") or "").split("--")[0]
+
+                    is_pw3_pn = any(
+                        _block_part_number(b).startswith("1707000")
                         for b in blks
                         if isinstance(b, dict)
                     )
@@ -887,13 +896,11 @@ class GatewayManager:
                         hw_pw3 = False
             if hw_pw3 is not None:
                 data.pw3 = bool(hw_pw3)
-            elif hw_pw3 is None and _raw_pw3_status is not None:
+            elif _raw_pw3_status is not None:
                 gw = self.gateways.get(gateway_id)
                 is_v1r = bool(gw and gw.rsa_key_configured)
                 if not is_v1r:
                     data.pw3 = bool(_raw_pw3_status)
-            elif _raw_pw3_status is not None:
-                data.pw3 = bool(_raw_pw3_status)
         except Exception:
             pass
 
