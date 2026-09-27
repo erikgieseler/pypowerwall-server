@@ -139,8 +139,29 @@ def extract_remote_meters(
     return meters
 
 
+def is_pv3_v1r_gateway(gateway: Any, data: Any) -> bool:
+    """True when a gateway qualifies for islanding controls (PW3 v1r only).
+
+    Mirrors the WebGUI auto-hide: RSA v1r transport plus confirmed PW3
+    hardware. Shared by discovery (which buttons to announce) and the
+    control loop (which islanding commands to accept).
+    """
+    try:
+        return bool(
+            gateway is not None
+            and getattr(gateway, "rsa_key_configured", False)
+            and data is not None
+            and data.pw3 is True
+        )
+    except Exception:
+        return False
+
+
 def discovery_signature(
-    strings: Optional[Dict[str, Any]], vitals: Optional[Dict[str, Any]]
+    strings: Optional[Dict[str, Any]],
+    vitals: Optional[Dict[str, Any]],
+    controls_enabled: bool = False,
+    is_pv3_v1r: bool = False,
 ) -> frozenset:
     """The optional (data-dependent) entities a snapshot would announce.
 
@@ -148,12 +169,17 @@ def discovery_signature(
     reports them. The publisher compares this signature with what it has
     already announced, so a family first seen on a later poll (e.g. after the
     first poll's vitals timed out) still gets discovered.
+    The v1r capability is tracked the same way: islanding buttons are only
+    announced once the hardware is known, so a cold start (pw3 None) that
+    later resolves to PW3 re-fires discovery.
     """
     signature = set()
     if isinstance(strings, dict):
         signature.update(("string", sid) for sid in strings)
     for din, cts in extract_remote_meters(vitals).items():
         signature.update(("remote_meter", din, ct) for ct in cts)
+    if controls_enabled:
+        signature.add(("controls", bool(is_pv3_v1r)))
     return frozenset(signature)
 
 

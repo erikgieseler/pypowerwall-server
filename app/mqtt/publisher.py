@@ -181,6 +181,7 @@ class MqttPublisher:
             from app.mqtt.ha_discovery import (
                 build_discovery_payloads,
                 extract_remote_meters,
+                is_pv3_v1r_gateway,
             )
 
             gateway_name = (
@@ -198,18 +199,11 @@ class MqttPublisher:
                 extract_remote_meters(status.data.vitals) if status.data else {}
             )
 
-            # Islanding like WebGUI auto-hide — PW3 v1r only (rsa_key_configured + pw3 True)
-            is_pv3_v1r = False
-            try:
-                if (
-                    status.gateway
-                    and getattr(status.gateway, "rsa_key_configured", False)
-                    and status.data
-                    and status.data.pw3 is True
-                ):
-                    is_pv3_v1r = True
-            except Exception:
-                is_pv3_v1r = False
+            # Islanding like WebGUI auto-hide — PW3 v1r only (see is_pv3_v1r_gateway)
+            is_pv3_v1r = is_pv3_v1r_gateway(
+                status.gateway if status else None,
+                status.data if status else None,
+            )
 
             payloads = build_discovery_payloads(
                 gateway_id=gateway_id,
@@ -246,15 +240,25 @@ class MqttPublisher:
             return
 
         # Send HA discovery payloads the first time we see this gateway, and
-        # again whenever a snapshot reports strings or remote-meter CTs not
-        # announced yet (re-sent after reconnect too: _discovery_sent is
-        # cleared there). Storing the union means a later snapshot without
-        # them (e.g. a vitals timeout) doesn't re-send.
-        from app.mqtt.ha_discovery import discovery_signature
+        # again whenever a snapshot reports strings, remote-meter CTs or the
+        # v1r capability not announced yet (re-sent after reconnect too:
+        # _discovery_sent is cleared there). Storing the union means a later
+        # snapshot without them (e.g. a vitals timeout) doesn't re-send.
+        from app.config import settings as _pub_settings  # late import
+        from app.mqtt.ha_discovery import discovery_signature, is_pv3_v1r_gateway
 
         data = status.data if status else None
+        controls_on = bool(_pub_settings.mqtt_controls_available)
+        controls_v1r = (
+            is_pv3_v1r_gateway(status.gateway if status else None, data)
+            if controls_on
+            else False
+        )
         signature = discovery_signature(
-            data.strings if data else None, data.vitals if data else None
+            data.strings if data else None,
+            data.vitals if data else None,
+            controls_enabled=controls_on,
+            is_pv3_v1r=controls_v1r,
         )
         announced = self._discovery_sent.get(gateway_id)
         if announced is None or not signature <= announced:
@@ -822,66 +826,51 @@ class MqttPublisher:
                     result = None
                     if control == "reserve":
                         val = payload.get("value")
-                        if not isinstance(val, int) or not 0 <= val <= 100:
+                        # bool is an int subclass — True/False must not pass as 1/0
+                        if not isinstance(val, int) or isinstance(val, bool) or not 0 <= val <= 100:
                             logger.debug(f"MQTT control reserve invalid value '{val}' for {gateway_id}")
                             continue
-                        # Hybrid: cloud_control for TEDAPI, else local
-                        if gateway_manager._cloud_control:
-                            result = await gateway_manager.cloud_control("set_reserve", val, timeout=10.0)
-                            if result is None:
-                                result = await gateway_manager.local_control(gateway_id, "set_reserve", val, timeout=10.0)
-                        else:
-                            result = await gateway_manager.local_control(gateway_id, "set_reserve", val, timeout=10.0)
-                            if result is None:
-                                result = await gateway_manager.cloud_control("set_reserve", val, timeout=10.0)
+                        result = await _route_gateway_control(
+                            gateway_id, "set_reserve", val, timeout=10.0
+                        )
 
                     elif control == "mode":
                         val = payload.get("value")
                         if val not in ("self_consumption", "backup", "autonomous"):
                             logger.debug(f"MQTT control mode invalid '{val}' for {gateway_id}")
                             continue
-                        if gateway_manager._cloud_control:
-                            result = await gateway_manager.cloud_control("set_mode", val, timeout=10.0)
-                            if result is None:
-                                result = await gateway_manager.local_control(gateway_id, "set_mode", val, timeout=10.0)
-                        else:
-                            result = await gateway_manager.local_control(gateway_id, "set_mode", val, timeout=10.0)
-                            if result is None:
-                                result = await gateway_manager.cloud_control("set_mode", val, timeout=10.0)
+                        result = await _route_gateway_control(
+                            gateway_id, "set_mode", val, timeout=10.0
+                        )
 
                     elif control == "grid_charging":
                         val = payload.get("value")
                         if not isinstance(val, bool):
                             logger.debug(f"MQTT control grid_charging invalid '{val}' for {gateway_id}")
                             continue
-                        if gateway_manager._cloud_control:
-                            result = await gateway_manager.cloud_control("set_grid_charging", val, timeout=10.0)
-                            if result is None:
-                                result = await gateway_manager.local_control(gateway_id, "set_grid_charging", val, timeout=10.0)
-                        else:
-                            result = await gateway_manager.local_control(gateway_id, "set_grid_charging", val, timeout=10.0)
-                            if result is None:
-                                result = await gateway_manager.cloud_control("set_grid_charging", val, timeout=10.0)
+                        result = await _route_gateway_control(
+                            gateway_id, "set_grid_charging", val, timeout=10.0
+                        )
 
                     elif control == "grid_export":
                         val = payload.get("value")
                         if val not in ("battery_ok", "pv_only", "never"):
                             logger.debug(f"MQTT control grid_export invalid '{val}' for {gateway_id}")
                             continue
-                        if gateway_manager._cloud_control:
-                            result = await gateway_manager.cloud_control("set_grid_export", val, timeout=10.0)
-                            if result is None:
-                                result = await gateway_manager.local_control(gateway_id, "set_grid_export", val, timeout=10.0)
-                        else:
-                            result = await gateway_manager.local_control(gateway_id, "set_grid_export", val, timeout=10.0)
-                            if result is None:
-                                result = await gateway_manager.cloud_control("set_grid_export", val, timeout=10.0)
+                        result = await _route_gateway_control(
+                            gateway_id, "set_grid_export", val, timeout=10.0
+                        )
 
                     elif control == "islanding":
                         action = payload.get("action")
                         confirm = payload.get("confirm")
                         if action not in ("off_grid", "on_grid") or confirm is not True:
                             logger.debug(f"MQTT control islanding invalid payload '{payload}' for {gateway_id}")
+                            continue
+                        if not _gateway_is_pv3_v1r(gateway_manager, gateway_id):
+                            logger.warning(
+                                f"MQTT control islanding rejected for {gateway_id}: not a PW3 v1r gateway"
+                            )
                             continue
                         if action == "off_grid":
                             try:
@@ -910,6 +899,68 @@ class MqttPublisher:
             raise
         except Exception as e:
             logger.debug(f"MQTT control message loop exited: {e}")
+
+def _gateway_is_pv3_v1r(gateway_manager, gateway_id: str) -> bool:
+    """True when the addressed gateway qualifies for islanding (PW3 v1r only).
+
+    Discovery only announces the islanding buttons for such gateways; the
+    control loop enforces the same rule since MQTT topics can be published
+    by anyone with broker access.
+    """
+    try:
+        from app.mqtt.ha_discovery import is_pv3_v1r_gateway
+
+        gw = gateway_manager.gateways.get(gateway_id)
+        status = gateway_manager.get_gateway(gateway_id)
+        return is_pv3_v1r_gateway(gw, status.data if status else None)
+    except Exception:
+        return False
+
+
+async def _route_gateway_control(
+    gateway_id: str, method: str, *args, timeout: float = 10.0
+):
+    """Route a validated control write to the addressed gateway.
+
+    Gateways with their own cloud connection (cloud_mode/FleetAPI) are
+    driven on that connection first so multi-gateway commands reach the
+    right site; the shared hybrid cloud_control (which cannot target a
+    gateway) is only a fallback there. All other gateways keep the hybrid
+    priority: shared cloud first when configured, else the gateway's own
+    local connection, each with fallback to the other path.
+    """
+    from app.core.gateway_manager import gateway_manager
+
+    gw = gateway_manager.gateways.get(gateway_id)
+    if gw is not None and (
+        getattr(gw, "cloud_mode", False) or getattr(gw, "fleetapi", False)
+    ):
+        result = await gateway_manager.local_control(
+            gateway_id, method, *args, timeout=timeout
+        )
+        if result is None and gateway_manager._cloud_control:
+            result = await gateway_manager.cloud_control(
+                method, *args, timeout=timeout
+            )
+        return result
+    if gateway_manager._cloud_control:
+        result = await gateway_manager.cloud_control(
+            method, *args, timeout=timeout
+        )
+        if result is None:
+            result = await gateway_manager.local_control(
+                gateway_id, method, *args, timeout=timeout
+            )
+        return result
+    result = await gateway_manager.local_control(
+        gateway_id, method, *args, timeout=timeout
+    )
+    if result is None:
+        result = await gateway_manager.cloud_control(
+            method, *args, timeout=timeout
+        )
+    return result
+
 
 def _safe_float(val) -> Optional[float]:
     """Convert a value to float, returning None on failure."""

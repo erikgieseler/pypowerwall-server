@@ -371,8 +371,16 @@ class Settings(BaseSettings):
 
     @property
     def mqtt_controls_available(self) -> bool:
-        """MQTT controls are available when broker + controls opt-in + PW_CONTROL_SECRET are set."""
-        return bool(self.mqtt_host and self.mqtt_controls_enabled and self.control_secret)
+        """MQTT controls need authenticated broker access: without
+        MQTT_USERNAME/MQTT_PASSWORD the broker cannot enforce the
+        pypowerwall/+/control/# ACL that control trust relies on."""
+        return bool(
+            self.mqtt_host
+            and self.mqtt_username
+            and self.mqtt_password
+            and self.mqtt_controls_enabled
+            and self.control_secret
+        )
 
     # Gateway configuration
     gateways: List[GatewayConfig] = Field(default_factory=list)

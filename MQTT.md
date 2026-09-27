@@ -165,7 +165,7 @@ last retained value persists until the gateway's `availability` goes `offline`.
 | `pypowerwall/{gw}/control/grid_export/set` | `{"value": "battery_ok"}` | `battery_ok`/`pv_only`/`never` |
 | `pypowerwall/{gw}/control/islanding/set` | `{"action":"off_grid","confirm":true}` | `off_grid`/`on_grid` + `confirm:true`, PW3 v1r-only, 30s cooldown |
 
-`PW_CONTROL_SECRET` never sent via MQTT — controls trust broker authentication (`MQTT_USERNAME`/`PASSWORD` + optional `MQTT_TLS`) and ACL `pypowerwall/+/control/#`.
+`PW_CONTROL_SECRET` never sent via MQTT — controls trust broker authentication (`MQTT_USERNAME`/`PASSWORD` + optional `MQTT_TLS`) and ACL `pypowerwall/+/control/#`. Controls stay disabled unless `MQTT_USERNAME` and `MQTT_PASSWORD` are both set, so an open broker can never accept commands.
 
 ### Lifetime energy topics (Wh accumulators)
 
