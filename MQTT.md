@@ -95,7 +95,7 @@ All use `MQTT_` prefix (no `PW_` prefix — MQTT is not a Powerwall concept).
 | `MQTT_HA_PREFIX` | `homeassistant` | HA discovery topic prefix |
 | `MQTT_CLIENT_ID` | `pypowerwall-server` | MQTT client identifier |
 | `MQTT_KEEPALIVE` | `60` | Broker keepalive interval (seconds) |
-| `MQTT_CONTROLS_ENABLED` | `no` | Enable HA control entities (reserve/mode/grid_* + islanding) via broker-trust (requires `PW_CONTROL_SECRET`) |
+| `MQTT_CONTROLS_ENABLED` | `no` | Enable HA control entities (reserve/mode/grid_* + islanding) via broker-trust (requires `PW_CONTROL_SECRET` + `MQTT_USERNAME`/`PASSWORD`) |
 
 Add to `app/config.py` Settings class:
 
@@ -123,7 +123,13 @@ def mqtt_enabled(self) -> bool:
 
 @property
 def mqtt_controls_available(self) -> bool:
-    return bool(self.mqtt_host and self.mqtt_controls_enabled and self.control_secret)
+    return bool(
+        self.mqtt_host
+        and self.mqtt_username
+        and self.mqtt_password
+        and self.mqtt_controls_enabled
+        and self.control_secret
+    )
 ```
 
 ---
@@ -163,7 +169,7 @@ last retained value persists until the gateway's `availability` goes `offline`.
 | `pypowerwall/{gw}/control/mode/set` | `{"value": "self_consumption"}` | `self_consumption`/`backup`/`autonomous` |
 | `pypowerwall/{gw}/control/grid_charging/set` | `{"value": true}` | `true`/`false` bool strict |
 | `pypowerwall/{gw}/control/grid_export/set` | `{"value": "battery_ok"}` | `battery_ok`/`pv_only`/`never` |
-| `pypowerwall/{gw}/control/islanding/set` | `{"action":"off_grid","confirm":true}` | `off_grid`/`on_grid` + `confirm:true`, PW3 v1r-only, 30s cooldown |
+| `pypowerwall/{gw}/control/islanding/set` | `{"action":"off_grid","confirm":true}` | `off_grid`/`on_grid` + `confirm:true`, v1r-only, 30s cooldown |
 
 `PW_CONTROL_SECRET` never sent via MQTT — controls trust broker authentication (`MQTT_USERNAME`/`PASSWORD` + optional `MQTT_TLS`) and ACL `pypowerwall/+/control/#`. Controls stay disabled unless `MQTT_USERNAME` and `MQTT_PASSWORD` are both set, so an open broker can never accept commands.
 
@@ -322,8 +328,8 @@ Controls (opt-in `MQTT_CONTROLS_ENABLED=yes` + `PW_CONTROL_SECRET`, broker-trust
 | Operation Mode Control | `select` | `self_consumption`, `backup`, `autonomous` | `mdi:cog` |
 | Grid Charging Control | `switch` | `ON` `{"value":true}` / `OFF` `{"value":false}` | `mdi:battery-charging-outline` |
 | Grid Export Control | `select` | `battery_ok`, `pv_only`, `never` | `mdi:transmission-tower-export` |
-| Go Off Grid | `button` | `{"action":"off_grid","confirm":true}` PW3 v1r-only | `mdi:transmission-tower-off` |
-| Reconnect Grid | `button` | `{"action":"on_grid","confirm":true}` PW3 v1r-only | `mdi:transmission-tower` |
+| Go Off Grid | `button` | `{"action":"off_grid","confirm":true}` v1r-only | `mdi:transmission-tower-off` |
+| Reconnect Grid | `button` | `{"action":"on_grid","confirm":true}` v1r-only | `mdi:transmission-tower` |
 
 Remote meter sensors (one set of five per CT, `entity_category: diagnostic`,
 named e.g. `Remote Meter EM…B10BC CT0 (solar) Voltage`, unique ID

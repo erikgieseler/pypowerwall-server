@@ -106,6 +106,7 @@ class MqttPublisher:
         # already announced; a gateway key means base discovery was sent
         self._discovery_sent: Dict[str, frozenset] = {}
         self._backoff: int = 2           # current reconnect backoff in seconds
+        self._controls_warn_done: bool = False  # half-configured controls warning
 
     # ------------------------------------------------------------------
     # Public API
@@ -181,7 +182,7 @@ class MqttPublisher:
             from app.mqtt.ha_discovery import (
                 build_discovery_payloads,
                 extract_remote_meters,
-                is_pv3_v1r_gateway,
+                is_v1r_gateway,
             )
 
             gateway_name = (
@@ -199,8 +200,8 @@ class MqttPublisher:
                 extract_remote_meters(status.data.vitals) if status.data else {}
             )
 
-            # Islanding like WebGUI auto-hide — PW3 v1r only (see is_pv3_v1r_gateway)
-            is_pv3_v1r = is_pv3_v1r_gateway(
+            # Islanding like WebGUI gate - v1r transport, PW2 + PW3 (see is_v1r_gateway)
+            is_v1r = is_v1r_gateway(
                 status.gateway if status else None,
                 status.data if status else None,
             )
@@ -214,7 +215,7 @@ class MqttPublisher:
                 string_ids=string_ids,
                 remote_meters=remote_meters or None,
                 controls_enabled=settings.mqtt_controls_available,
-                is_pv3_v1r=is_pv3_v1r,
+                is_v1r=is_v1r,
             )
             for topic, payload in payloads:
                 await self._safe_publish(topic, payload, retain=True, qos=settings.mqtt_qos)
@@ -245,12 +246,12 @@ class MqttPublisher:
         # _discovery_sent is cleared there). Storing the union means a later
         # snapshot without them (e.g. a vitals timeout) doesn't re-send.
         from app.config import settings as _pub_settings  # late import
-        from app.mqtt.ha_discovery import discovery_signature, is_pv3_v1r_gateway
+        from app.mqtt.ha_discovery import discovery_signature, is_v1r_gateway
 
         data = status.data if status else None
         controls_on = bool(_pub_settings.mqtt_controls_available)
         controls_v1r = (
-            is_pv3_v1r_gateway(status.gateway if status else None, data)
+            is_v1r_gateway(status.gateway if status else None, data)
             if controls_on
             else False
         )
@@ -258,7 +259,7 @@ class MqttPublisher:
             data.strings if data else None,
             data.vitals if data else None,
             controls_enabled=controls_on,
-            is_pv3_v1r=controls_v1r,
+            is_v1r=controls_v1r,
         )
         announced = self._discovery_sent.get(gateway_id)
         if announced is None or not signature <= announced:
@@ -713,6 +714,21 @@ class MqttPublisher:
                             )
                         except Exception as e:
                             logger.warning(f"MQTT control subscribe failed: {e}")
+                    elif (
+                        not self._controls_warn_done
+                        and settings.mqtt_controls_enabled
+                        and settings.control_secret
+                    ):
+                        # Opt-in + secret but no broker user/password: controls
+                        # stay off (fail closed). Warn once so the silent
+                        # off-state after upgrade is discoverable.
+                        self._controls_warn_done = True
+                        logger.warning(
+                            "MQTT controls requested (MQTT_CONTROLS_ENABLED + "
+                            "PW_CONTROL_SECRET) but disabled: set MQTT_USERNAME "
+                            "and MQTT_PASSWORD so the broker can enforce the "
+                            "control-topic ACL"
+                        )
 
                     # Inner heartbeat loop: stays alive until a publish failure
                     # sets _connected=False, or until shutdown is requested.
@@ -867,9 +883,9 @@ class MqttPublisher:
                         if action not in ("off_grid", "on_grid") or confirm is not True:
                             logger.debug(f"MQTT control islanding invalid payload '{payload}' for {gateway_id}")
                             continue
-                        if not _gateway_is_pv3_v1r(gateway_manager, gateway_id):
+                        if not _gateway_is_v1r(gateway_manager, gateway_id):
                             logger.warning(
-                                f"MQTT control islanding rejected for {gateway_id}: not a PW3 v1r gateway"
+                                f"MQTT control islanding rejected for {gateway_id}: no v1r transport"
                             )
                             continue
                         if action == "off_grid":
@@ -900,19 +916,20 @@ class MqttPublisher:
         except Exception as e:
             logger.debug(f"MQTT control message loop exited: {e}")
 
-def _gateway_is_pv3_v1r(gateway_manager, gateway_id: str) -> bool:
-    """True when the addressed gateway qualifies for islanding (PW3 v1r only).
+
+def _gateway_is_v1r(gateway_manager, gateway_id: str) -> bool:
+    """True when the addressed gateway uses the v1r transport (PW2 + PW3).
 
     Discovery only announces the islanding buttons for such gateways; the
     control loop enforces the same rule since MQTT topics can be published
     by anyone with broker access.
     """
     try:
-        from app.mqtt.ha_discovery import is_pv3_v1r_gateway
+        from app.mqtt.ha_discovery import is_v1r_gateway
 
         gw = gateway_manager.gateways.get(gateway_id)
         status = gateway_manager.get_gateway(gateway_id)
-        return is_pv3_v1r_gateway(gw, status.data if status else None)
+        return is_v1r_gateway(gw, status.data if status else None)
     except Exception:
         return False
 

@@ -7,7 +7,7 @@ Covers:
 - Controls require broker auth (MQTT_USERNAME + MQTT_PASSWORD)
 - Control topics are publishable via _control_message_loop with validation
 - Reserve rejects booleans (bool is an int subclass)
-- Islanding is rejected unless the gateway is PW3 v1r
+- Islanding is rejected without v1r transport, accepted for PW2 + PW3 v1r
 - Discovery re-fires when v1r capability arrives late (cold start)
 - Cloud-mode gateways are driven on their own connection first
 """
@@ -34,14 +34,14 @@ def test_controls_disabled_no_extra_entities():
 
 
 def test_controls_enabled_adds_six_entities():
-    # Without PW3 v1r: 4 controls (no islanding)
+    # Without v1r transport: 4 controls (no islanding)
     results = build_discovery_payloads(
         gateway_id="home",
         gateway_name="Home",
         topic_prefix="pypowerwall",
         ha_prefix="homeassistant",
         controls_enabled=True,
-        is_pv3_v1r=False,
+        is_v1r=False,
     )
     assert len(results) == 27
     topics = {t for t, _ in results}
@@ -51,14 +51,14 @@ def test_controls_enabled_adds_six_entities():
     assert "homeassistant/select/pypowerwall_home_grid_export_control/config" in topics
     assert "homeassistant/button/pypowerwall_home_go_off_grid/config" not in topics
 
-    # With PW3 v1r: +2 islanding buttons
+    # With v1r transport (PW2 or PW3): +2 islanding buttons
     results_v1r = build_discovery_payloads(
         gateway_id="home",
         gateway_name="Home",
         topic_prefix="pypowerwall",
         ha_prefix="homeassistant",
         controls_enabled=True,
-        is_pv3_v1r=True,
+        is_v1r=True,
     )
     assert len(results_v1r) == 29
     topics_v1r = {t for t, _ in results_v1r}
@@ -304,18 +304,35 @@ async def test_control_message_islanding_needs_v1r(monkeypatch):
     )
     mock_local.assert_not_called()
 
-    # RSA gateway but hardware unknown (cold start, pw3 None): rejected
+    # RSA gateway but hardware unknown (cold start, no status yet): transport
+    # is configured, so islanding is accepted (no one-poll delay)
     mock_local, _ = await _run_control_messages(
         monkeypatch, "cold", {"host": "1.1.1.1", "rsa_key_configured": True},
         [("pypowerwall/cold/control/islanding/set", payload)],
     )
-    mock_local.assert_not_called()
+    mock_local.assert_called_once()
+    assert mock_local.call_args[0][1] == "go_off_grid"
+
+    # RSA + confirmed PW2 hardware: still routed (library signs for both)
+    status = GatewayStatus(
+        gateway=Gateway(id="pw2", name="PW2", host="1.1.1.1",
+                        rsa_key_configured=True, online=True),
+        data=PowerwallData(pw3=False, tedapi_mode="v1r"),
+        online=True, last_updated=1.0,
+    )
+    monkeypatch.setattr(gateway_manager, "get_gateway", lambda gid: status)
+    mock_local, _ = await _run_control_messages(
+        monkeypatch, "pw2", {"host": "1.1.1.1", "rsa_key_configured": True},
+        [("pypowerwall/pw2/control/islanding/set", payload)],
+    )
+    mock_local.assert_called_once()
+    assert mock_local.call_args[0][1] == "go_off_grid"
 
     # RSA + confirmed PW3 hardware: routed to go_off_grid
     status = GatewayStatus(
         gateway=Gateway(id="v1r", name="V1R", host="1.1.1.1",
                         rsa_key_configured=True, online=True),
-        data=PowerwallData(pw3=True), online=True, last_updated=1.0,
+        data=PowerwallData(pw3=True, tedapi_mode="v1r"), online=True, last_updated=1.0,
     )
     monkeypatch.setattr(gateway_manager, "get_gateway", lambda gid: status)
     mock_local, _ = await _run_control_messages(
@@ -325,12 +342,26 @@ async def test_control_message_islanding_needs_v1r(monkeypatch):
     mock_local.assert_called_once()
     assert mock_local.call_args[0][1] == "go_off_grid"
 
+    # Data definitively reports non-v1r transport: rejected despite RSA flag
+    status = GatewayStatus(
+        gateway=Gateway(id="full", name="Full", host="1.1.1.1",
+                        rsa_key_configured=True, online=True),
+        data=PowerwallData(pw3=True, tedapi_mode="full"),
+        online=True, last_updated=1.0,
+    )
+    monkeypatch.setattr(gateway_manager, "get_gateway", lambda gid: status)
+    mock_local, _ = await _run_control_messages(
+        monkeypatch, "full", {"host": "1.1.1.1", "rsa_key_configured": True},
+        [("pypowerwall/full/control/islanding/set", payload)],
+    )
+    mock_local.assert_not_called()
+
 
 def test_discovery_signature_tracks_v1r():
     from app.mqtt.ha_discovery import discovery_signature
 
-    off = discovery_signature(None, None, controls_enabled=True, is_pv3_v1r=False)
-    on = discovery_signature(None, None, controls_enabled=True, is_pv3_v1r=True)
+    off = discovery_signature(None, None, controls_enabled=True, is_v1r=False)
+    on = discovery_signature(None, None, controls_enabled=True, is_v1r=True)
     assert ("controls", False) in off
     assert ("controls", True) in on
     assert not on <= off  # capability flip re-fires discovery
@@ -378,12 +409,64 @@ async def test_discovery_resent_when_v1r_arrives_late(monkeypatch):
     await pub.publish_gateway("gw", make_status(False, None))
     assert [t for t in topics if "homeassistant" in t] == []
 
-    # Hardware resolves to PW3 v1r: discovery re-fires with buttons
+    # v1r transport appears (PW2 hardware!): discovery re-fires with buttons
     topics.clear()
-    await pub.publish_gateway("gw", make_status(True, True))
+    await pub.publish_gateway("gw", make_status(True, False))
     resent = [t for t in topics if "homeassistant" in t]
     assert len(resent) > 0
     assert any("go_off_grid" in t for t in resent)
+
+
+@pytest.mark.asyncio
+async def test_controls_half_config_warns_once(monkeypatch, caplog):
+    import logging
+    import sys
+    import types
+
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mqtt_host", "localhost")
+    monkeypatch.setattr(settings, "mqtt_controls_enabled", True)
+    monkeypatch.setattr(settings, "control_secret", "secret")
+    monkeypatch.setattr(settings, "mqtt_username", None)
+    monkeypatch.setattr(settings, "mqtt_password", None)
+
+    pub = MqttPublisher()
+
+    async def fake_safe(self, topic, payload, retain, qos):
+        return None
+
+    monkeypatch.setattr(MqttPublisher, "_safe_publish", fake_safe)
+
+    class FakeCM:
+        def __init__(self, holder):
+            self._holder = holder
+
+        async def __aenter__(self):
+            self._holder[0]._shutdown = True  # one pass, then stop
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return False
+
+    holder = [pub]
+    fake_aiomqtt = types.ModuleType("aiomqtt")
+    fake_aiomqtt.Client = lambda **kwargs: FakeCM(holder)
+    fake_aiomqtt.Will = lambda **kwargs: object()
+    monkeypatch.setitem(sys.modules, "aiomqtt", fake_aiomqtt)
+
+    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
+        await asyncio.wait_for(pub._connection_loop(), timeout=5)
+        warnings = [r for r in caplog.records
+                    if "MQTT_USERNAME" in r.getMessage()]
+        assert len(warnings) == 1
+
+        # Second connect: no duplicate warning
+        caplog.clear()
+        pub._shutdown = False
+        await asyncio.wait_for(pub._connection_loop(), timeout=5)
+        assert [r for r in caplog.records
+                if "MQTT_USERNAME" in r.getMessage()] == []
 
 
 @pytest.mark.asyncio

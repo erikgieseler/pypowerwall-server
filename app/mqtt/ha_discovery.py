@@ -66,7 +66,7 @@ Controls (when MQTT_CONTROLS_ENABLED=yes + PW_CONTROL_SECRET set, broker-trust):
     mode          — select [self_consumption, backup, autonomous] (state mode)
     grid_charging — switch (state grid_charging, command .../control/grid_charging/set)
     grid_export   — select [battery_ok, pv_only, never] (state grid_export)
-    islanding     — button Go Off Grid / Reconnect Grid (command .../control/islanding/set, PW3 v1r-only)
+    islanding     — button Go Off Grid / Reconnect Grid (command .../control/islanding/set, v1r-only)
 
 All sensors share a single "Powerwall" device block so HA groups them together.
 The device model is set from PowerwallData.version when available, otherwise
@@ -139,20 +139,24 @@ def extract_remote_meters(
     return meters
 
 
-def is_pv3_v1r_gateway(gateway: Any, data: Any) -> bool:
-    """True when a gateway qualifies for islanding controls (PW3 v1r only).
+def is_v1r_gateway(gateway: Any, data: Any) -> bool:
+    """True when a gateway uses the v1r transport (signed-command capable).
 
-    Mirrors the WebGUI auto-hide: RSA v1r transport plus confirmed PW3
-    hardware. Shared by discovery (which buttons to announce) and the
-    control loop (which islanding commands to accept).
+    Mirrors the WebGUI islanding gate (tedapi + tedapi_mode v1r): the RSA
+    key marks a v1r connection, and poll data vetoes only when it
+    definitively reports another mode. The library's signed islanding
+    command works on Powerwall 2 and 3 alike, so hardware must NOT gate
+    it — otherwise PW2 v1r users lose a control they have today.
+    Shared by discovery (which buttons to announce) and the control loop
+    (which islanding commands to accept).
     """
     try:
-        return bool(
-            gateway is not None
-            and getattr(gateway, "rsa_key_configured", False)
-            and data is not None
-            and data.pw3 is True
-        )
+        if gateway is None or not getattr(gateway, "rsa_key_configured", False):
+            return False
+        if data is None:
+            return True
+        mode = getattr(data, "tedapi_mode", None)
+        return mode in (None, "v1r")
     except Exception:
         return False
 
@@ -161,7 +165,7 @@ def discovery_signature(
     strings: Optional[Dict[str, Any]],
     vitals: Optional[Dict[str, Any]],
     controls_enabled: bool = False,
-    is_pv3_v1r: bool = False,
+    is_v1r: bool = False,
 ) -> frozenset:
     """The optional (data-dependent) entities a snapshot would announce.
 
@@ -169,9 +173,9 @@ def discovery_signature(
     reports them. The publisher compares this signature with what it has
     already announced, so a family first seen on a later poll (e.g. after the
     first poll's vitals timed out) still gets discovered.
-    The v1r capability is tracked the same way: islanding buttons are only
-    announced once the hardware is known, so a cold start (pw3 None) that
-    later resolves to PW3 re-fires discovery.
+    The v1r capability is tracked the same way: if it flips between polls
+    (e.g. transport mode resolving late), discovery re-fires so the
+    islanding buttons appear.
     """
     signature = set()
     if isinstance(strings, dict):
@@ -179,7 +183,7 @@ def discovery_signature(
     for din, cts in extract_remote_meters(vitals).items():
         signature.update(("remote_meter", din, ct) for ct in cts)
     if controls_enabled:
-        signature.add(("controls", bool(is_pv3_v1r)))
+        signature.add(("controls", bool(is_v1r)))
     return frozenset(signature)
 
 
@@ -203,7 +207,7 @@ def build_discovery_payloads(
     string_ids: Optional[Sequence[str]] = None,
     remote_meters: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
     controls_enabled: bool = False,
-    is_pv3_v1r: bool = False,
+    is_v1r: bool = False,
 ) -> list[tuple[str, str]]:
     """Build all HA auto-discovery (topic, payload) pairs for a gateway.
 
@@ -224,8 +228,8 @@ def build_discovery_payloads(
                        added so HA auto-discovers each wireless CT meter.
         controls_enabled: When True, HA control entities (number/select/switch/button)
                        are added (requires MQTT_CONTROLS_ENABLED + PW_CONTROL_SECRET).
-        is_pv3_v1r:    When True, islanding buttons (Go Off Grid/Reconnect) are added
-                       (PW3 v1r-only, like WebGUI `islanding` section auto-hide).
+        is_v1r:    When True, islanding buttons (Go Off Grid/Reconnect) are added
+                       (v1r transport, PW2 + PW3, like the WebGUI `islanding` section).
 
     Returns:
         List of (topic, json_payload_str) tuples, one per sensor/binary sensor/control.
@@ -647,8 +651,8 @@ def build_discovery_payloads(
                 icon="mdi:transmission-tower-export",
             ),
         ])
-        # Islanding buttons like WebGUI auto-hide — PW3 v1r only
-        if is_pv3_v1r:
+        # Islanding buttons like the WebGUI gate — v1r transport (PW2 + PW3)
+        if is_v1r:
             results.extend([
                 button(
                     "go_off_grid", "Go Off Grid",
