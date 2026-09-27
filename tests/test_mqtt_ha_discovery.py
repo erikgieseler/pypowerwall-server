@@ -197,6 +197,46 @@ class TestBuildDiscoveryPayloads:
         assert p["payload_off"] == "false"
         assert p["state_topic"] == "pypowerwall/home/online"
 
+    def test_grid_connected_binary_sensor_fields(self):
+        results = dict(self._payloads())
+        topic = "homeassistant/binary_sensor/pypowerwall_home_grid_connected/config"
+        p = results[topic]
+        assert p["unique_id"] == "pypowerwall_home_grid_connected"
+        assert p["state_topic"] == "pypowerwall/home/grid_connected"
+        assert p["payload_on"] == "true"
+        assert p["payload_off"] == "false"
+        assert p["device_class"] == "connectivity"
+
+    def test_grid_charging_binary_sensor_fields(self):
+        results = dict(self._payloads())
+        topic = "homeassistant/binary_sensor/pypowerwall_home_grid_charging/config"
+        p = results[topic]
+        assert p["unique_id"] == "pypowerwall_home_grid_charging"
+        assert p["state_topic"] == "pypowerwall/home/grid_charging"
+        assert p["payload_on"] == "true"
+        assert p["payload_off"] == "false"
+        assert "device_class" not in p  # generic On/Off
+
+    def test_grid_export_text_sensor_fields(self):
+        results = dict(self._payloads())
+        topic = "homeassistant/sensor/pypowerwall_home_grid_export/config"
+        p = results[topic]
+        assert p["unique_id"] == "pypowerwall_home_grid_export"
+        assert p["state_topic"] == "pypowerwall/home/grid_export"
+        # Text sensor: HA rejects a unit/device_class/state_class on text states
+        for key in ("unit_of_measurement", "device_class", "state_class"):
+            assert key not in p
+
+    def test_time_remaining_sensor_fields(self):
+        results = dict(self._payloads())
+        topic = "homeassistant/sensor/pypowerwall_home_time_remaining/config"
+        p = results[topic]
+        assert p["unique_id"] == "pypowerwall_home_time_remaining"
+        assert p["state_topic"] == "pypowerwall/home/time_remaining"
+        assert p["unit_of_measurement"] == "h"
+        assert p["device_class"] == "duration"
+        assert p["state_class"] == "measurement"
+
     def test_availability_references_correct_topic(self):
         results = self._payloads(gateway_id="main", prefix="pw")
         for topic, payload in results:

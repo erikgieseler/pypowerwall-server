@@ -146,6 +146,9 @@ Base path: `{MQTT_TOPIC_PREFIX}/{gateway_id}/`
 | `pypowerwall/{gw}/time_remaining` | `5.50` | `h` (backup time remaining, rounded 2 dp; `status` JSON keeps raw precision) |
 | `pypowerwall/{gw}/online` | `true` or `false` | — |
 
+Optional topics are published only when the source value is available; the
+last retained value persists until the gateway's `availability` goes `offline`.
+
 ### Lifetime energy topics (Wh accumulators)
 
 Lifetime energy totals from `/api/meters/aggregates` — on PW3/TEDAPI these are

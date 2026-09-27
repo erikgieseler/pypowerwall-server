@@ -365,11 +365,12 @@ class MqttPublisher:
                         retain, qos,
                     )
 
-                if data.time_remaining is not None:
+                time_remaining = _safe_float(data.time_remaining)
+                if time_remaining is not None:
                     # Topic rounded to 2 decimals for HA; summary JSON keeps raw precision
                     await self._safe_publish(
                         f"{prefix}/time_remaining",
-                        f"{float(data.time_remaining):.2f}",
+                        f"{time_remaining:.2f}",
                         retain, qos,
                     )
 
