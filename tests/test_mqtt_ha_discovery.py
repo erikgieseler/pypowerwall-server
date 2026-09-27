@@ -76,7 +76,8 @@ class TestBuildDiscoveryPayloads:
 
     def test_returns_expected_count(self):
         results = self._payloads()
-        assert len(results) == BASE_ENTITY_COUNT
+        # 20 sensors + 3 binary sensors = 23 (grid_connected/grid_charging added)
+        assert len(results) == 23
 
     def test_all_topics_start_with_ha_prefix(self):
         results = self._payloads(ha_prefix="homeassistant")
@@ -282,7 +283,7 @@ class TestBuildDiscoveryPayloads:
             ha_prefix="homeassistant",
             version=None,
         )
-        assert len(results) == BASE_ENTITY_COUNT
+        assert len(results) == 23
         for _, payload_str in results:
             p = json.loads(payload_str)
             assert p["device"]["sw_version"] == "unknown"
@@ -297,7 +298,7 @@ class TestBuildDiscoveryPayloads:
         )
         string_topics = [t for t, _ in results if "_string_" in t]
         assert string_topics == []
-        assert len(results) == BASE_ENTITY_COUNT
+        assert len(results) == 23
 
     def test_string_sensors_single_pw3(self):
         """Six strings A–F → 6×3 per-string + 3×3 paired rollup = 27 extra entries."""
@@ -310,8 +311,8 @@ class TestBuildDiscoveryPayloads:
             string_ids=string_ids,
         )
         payloads = {t: json.loads(p) for t, p in results}
-        # base + 6 strings × 3 metrics + 3 pairs × 3 metrics
-        assert len(results) == BASE_ENTITY_COUNT + 18 + 9
+        # 23 base + 6 strings × 3 metrics + 3 pairs × 3 metrics = 23 + 18 + 9 = 50
+        assert len(results) == 50
 
         # Spot-check string A voltage
         topic = "homeassistant/sensor/pypowerwall_home_string_a_voltage/config"
@@ -341,8 +342,8 @@ class TestBuildDiscoveryPayloads:
             string_ids=string_ids,
         )
         payloads = {t: json.loads(p) for t, p in results}
-        # base + 2×3 per-string + 1 pair (AB) × 3
-        assert len(results) == BASE_ENTITY_COUNT + 6 + 3
+        # 23 base + 2×3 per-string + 1 pair (AB) × 3 = 23 + 6 + 3 = 32
+        assert len(results) == 32
         # AB pair present
         assert "homeassistant/sensor/pypowerwall_home_string_ab_voltage/config" in payloads
         # CD and EF pairs must NOT be present (C/D/E/F not in string_ids)
@@ -360,8 +361,8 @@ class TestBuildDiscoveryPayloads:
             string_ids=string_ids,
         )
         payloads = {t: json.loads(p) for t, p in results}
-        # base + 12×3 per-string + 6 pairs × 3
-        assert len(results) == BASE_ENTITY_COUNT + 36 + 18
+        # 23 base + 12×3 per-string + 6 pairs × 3 = 23 + 36 + 18 = 77
+        assert len(results) == 77
         # Spot-check numbered pair AB1
         assert "homeassistant/sensor/pypowerwall_home_string_ab1_voltage/config" in payloads
         assert "homeassistant/sensor/pypowerwall_home_string_ab2_power/config" in payloads
@@ -578,7 +579,7 @@ class TestPublisherHaDiscovery:
 
         topics = [c.args[0] for c in mock_client.publish.call_args_list]
         disc_topics = [t for t in topics if "homeassistant" in t]
-        assert len(disc_topics) == BASE_ENTITY_COUNT  # one per sensor/binary_sensor
+        assert len(disc_topics) == 23  # one per sensor/binary_sensor
 
     @pytest.mark.asyncio
     async def test_discovery_sent_only_once_per_connection(self, monkeypatch):
@@ -625,7 +626,7 @@ class TestPublisherHaDiscovery:
             for c in mock_client.publish.call_args_list
             if "homeassistant" in c.args[0]
         ]
-        assert len(disc_topics) == BASE_ENTITY_COUNT
+        assert len(disc_topics) == 23
 
     @pytest.mark.asyncio
     async def test_discovery_skipped_when_ha_discovery_false(self, monkeypatch):

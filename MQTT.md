@@ -297,21 +297,6 @@ Binary sensors:
 | Grid Connected | `connectivity` |
 | Grid Charging | — |
 
-Remote meter sensors (one set of five per CT, `entity_category: diagnostic`,
-named e.g. `Remote Meter EM…B10BC CT0 (solar) Voltage`, unique ID
-`pypowerwall_{gw}_remote_meter_{din_slug}_ct{n}_{metric}` where `din_slug` is
-the DIN lower-cased with non-alphanumerics replaced by `_`):
-| Sensor | HA device_class | Unit | state_class |
-|--------|----------------|------|-------------|
-| Voltage | `voltage` | `V` | `measurement` |
-| Current | `current` | `A` | `measurement` |
-| Power | `power` | `W` | `measurement` |
-| Energy Imported | `energy` | `Wh` | `total_increasing` |
-| Energy Exported | `energy` | `Wh` | `total_increasing` |
-
-Solar-string and remote-meter sensors are discovered when a poll first
-reports them, including on a later poll if the first one didn't.
-
 ---
 
 ## `MqttPublisher` Class Design
