@@ -61,6 +61,13 @@ Binary sensor:
 Numeric sensors:
     time_remaining — Backup time remaining (h, device_class=duration)
 
+Controls (when MQTT_CONTROLS_ENABLED=yes + PW_CONTROL_SECRET set, broker-trust):
+    reserve       — number 0-100 % (state reserve, command pypowerwall/{gw}/control/reserve/set)
+    mode          — select [self_consumption, backup, autonomous] (state mode)
+    grid_charging — switch (state grid_charging, command .../control/grid_charging/set)
+    grid_export   — select [battery_ok, pv_only, never] (state grid_export)
+    islanding     — button Go Off Grid / Reconnect Grid (command .../control/islanding/set, PW3 v1r-only)
+
 All sensors share a single "Powerwall" device block so HA groups them together.
 The device model is set from PowerwallData.version when available, otherwise
 "Powerwall".
@@ -169,6 +176,8 @@ def build_discovery_payloads(
     version: Optional[str] = None,
     string_ids: Optional[Sequence[str]] = None,
     remote_meters: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
+    controls_enabled: bool = False,
+    is_pv3_v1r: bool = False,
 ) -> list[tuple[str, str]]:
     """Build all HA auto-discovery (topic, payload) pairs for a gateway.
 
@@ -187,9 +196,13 @@ def build_discovery_payloads(
                        extract_remote_meters(pw.vitals()) - {din: {ct_index:
                        {metric: value}}}.  When provided, per-CT sensors are
                        added so HA auto-discovers each wireless CT meter.
+        controls_enabled: When True, HA control entities (number/select/switch/button)
+                       are added (requires MQTT_CONTROLS_ENABLED + PW_CONTROL_SECRET).
+        is_pv3_v1r:    When True, islanding buttons (Go Off Grid/Reconnect) are added
+                       (PW3 v1r-only, like WebGUI `islanding` section auto-hide).
 
     Returns:
-        List of (topic, json_payload_str) tuples, one per sensor/binary sensor.
+        List of (topic, json_payload_str) tuples, one per sensor/binary sensor/control.
     """
     device = _device_block(gateway_id, gateway_name, version)
     data_prefix = f"{topic_prefix}/{gateway_id}"
@@ -264,6 +277,118 @@ def build_discovery_payloads(
         }
         if device_class:
             payload["device_class"] = device_class
+        if icon:
+            payload["icon"] = icon
+        return disc_topic, json.dumps(payload)
+
+    def number(
+        uid_suffix: str,
+        name: str,
+        state_topic: str,
+        command_topic: str,
+        unit: Optional[str] = None,
+        device_class: Optional[str] = None,
+        icon: Optional[str] = None,
+        min_val: float = 0,
+        max_val: float = 100,
+        step: float = 1,
+    ) -> tuple[str, str]:
+        """Build a HA number (slider) discovery entry for controls."""
+        unique_id = f"pypowerwall_{gateway_id}_{uid_suffix}"
+        disc_topic = f"{ha_prefix}/number/{unique_id}/config"
+        payload: dict = {
+            "name": name,
+            "unique_id": unique_id,
+            "state_topic": state_topic,
+            "command_topic": command_topic,
+            "command_template": '{"value": {{ value | int }}}',
+            "min": min_val,
+            "max": max_val,
+            "step": step,
+            "device": device,
+            "availability": avail(),
+            "availability_mode": "all",
+        }
+        if unit:
+            payload["unit_of_measurement"] = unit
+        if device_class:
+            payload["device_class"] = device_class
+        if icon:
+            payload["icon"] = icon
+        return disc_topic, json.dumps(payload)
+
+    def select(
+        uid_suffix: str,
+        name: str,
+        state_topic: str,
+        command_topic: str,
+        options: list[str],
+        icon: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Build a HA select discovery entry for controls."""
+        unique_id = f"pypowerwall_{gateway_id}_{uid_suffix}"
+        disc_topic = f"{ha_prefix}/select/{unique_id}/config"
+        payload: dict = {
+            "name": name,
+            "unique_id": unique_id,
+            "state_topic": state_topic,
+            "command_topic": command_topic,
+            "command_template": '{"value": "{{ value }}"}',
+            "options": options,
+            "device": device,
+            "availability": avail(),
+            "availability_mode": "all",
+        }
+        if icon:
+            payload["icon"] = icon
+        return disc_topic, json.dumps(payload)
+
+    def switch(
+        uid_suffix: str,
+        name: str,
+        state_topic: str,
+        command_topic: str,
+        icon: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Build a HA switch discovery entry for controls."""
+        unique_id = f"pypowerwall_{gateway_id}_{uid_suffix}"
+        disc_topic = f"{ha_prefix}/switch/{unique_id}/config"
+        payload: dict = {
+            "name": name,
+            "unique_id": unique_id,
+            "state_topic": state_topic,
+            "command_topic": command_topic,
+            "payload_on": '{"value": true}',
+            "payload_off": '{"value": false}',
+            "state_on": "true",
+            "state_off": "false",
+            "device": device,
+            "availability": avail(),
+            "availability_mode": "all",
+        }
+        if icon:
+            payload["icon"] = icon
+        return disc_topic, json.dumps(payload)
+
+    def button(
+        uid_suffix: str,
+        name: str,
+        command_topic: str,
+        payload_press: str,
+        icon: Optional[str] = None,
+    ) -> tuple[str, str]:
+        """Build a HA button discovery entry for controls."""
+        unique_id = f"pypowerwall_{gateway_id}_{uid_suffix}"
+        disc_topic = f"{ha_prefix}/button/{unique_id}/config"
+        payload: dict = {
+            "name": name,
+            "unique_id": unique_id,
+            "command_topic": command_topic,
+            "payload_press": payload_press,
+            "device": device,
+            "availability": avail(),
+            "availability_mode": "all",
+        }
         if icon:
             payload["icon"] = icon
         return disc_topic, json.dumps(payload)
@@ -464,6 +589,54 @@ def build_discovery_payloads(
             icon="mdi:timer-outline",
         ),
     ]
+
+    if controls_enabled:
+        results.extend([
+            number(
+                "reserve_control", "Backup Reserve Control",
+                f"{data_prefix}/reserve",
+                f"{data_prefix}/control/reserve/set",
+                unit="%",
+                icon="mdi:battery-lock",
+                min_val=0, max_val=100, step=1,
+            ),
+            select(
+                "mode_control", "Operation Mode Control",
+                f"{data_prefix}/mode",
+                f"{data_prefix}/control/mode/set",
+                options=["self_consumption", "backup", "autonomous"],
+                icon="mdi:cog",
+            ),
+            switch(
+                "grid_charging_control", "Grid Charging Control",
+                f"{data_prefix}/grid_charging",
+                f"{data_prefix}/control/grid_charging/set",
+                icon="mdi:battery-charging-outline",
+            ),
+            select(
+                "grid_export_control", "Grid Export Control",
+                f"{data_prefix}/grid_export",
+                f"{data_prefix}/control/grid_export/set",
+                options=["battery_ok", "pv_only", "never"],
+                icon="mdi:transmission-tower-export",
+            ),
+        ])
+        # Islanding buttons like WebGUI auto-hide — PW3 v1r only
+        if is_pv3_v1r:
+            results.extend([
+                button(
+                    "go_off_grid", "Go Off Grid",
+                    f"{data_prefix}/control/islanding/set",
+                    '{"action":"off_grid","confirm":true}',
+                    icon="mdi:transmission-tower-off",
+                ),
+                button(
+                    "reconnect_grid", "Reconnect Grid",
+                    f"{data_prefix}/control/islanding/set",
+                    '{"action":"on_grid","confirm":true}',
+                    icon="mdi:transmission-tower",
+                ),
+            ])
 
     # --- Solar string sensors (per-string + paired rollups) ---
     if string_ids:
