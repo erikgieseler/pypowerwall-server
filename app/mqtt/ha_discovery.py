@@ -61,12 +61,14 @@ Binary sensor:
 Numeric sensors:
     time_remaining — Backup time remaining (h, device_class=duration)
 
-Controls (when MQTT_CONTROLS_ENABLED=yes + PW_CONTROL_SECRET set, broker-trust):
+Controls (MQTT_CONTROLS bitmask + PW_CONTROL_SECRET set, broker-trust;
+only bits in the mask are announced — 1 reserve, 2 mode, 4 grid_charging,
+8 grid_export, 16 islanding):
     reserve       — number 0-100 % (state reserve, command pypowerwall/{gw}/control/reserve/set)
     mode          — select [self_consumption, backup, autonomous] (state mode)
-    grid_charging — switch (state grid_charging, command .../control/grid_charging/set)
-    grid_export   — select [battery_ok, pv_only, never] (state grid_export)
-    islanding     — button Go Off Grid / Reconnect Grid (command .../control/islanding/set, v1r-only)
+    grid_charging — switch (state grid_charging, command .../control/grid_charging/set; only where executable)
+    grid_export   — select [battery_ok, pv_only, never] (state grid_export; only where executable)
+    islanding     — button Go Off Grid / Reconnect Grid (command .../control/islanding/set, confirmed-v1r-only)
 
 All sensors share a single "Powerwall" device block so HA groups them together.
 The device model is set from PowerwallData.version when available, otherwise
@@ -142,11 +144,12 @@ def extract_remote_meters(
 def is_v1r_gateway(gateway: Any, data: Any) -> bool:
     """True when a gateway uses the v1r transport (signed-command capable).
 
-    Mirrors the WebGUI islanding gate (tedapi + tedapi_mode v1r): the RSA
-    key marks a v1r connection, and poll data vetoes only when it
-    definitively reports another mode. The library's signed islanding
-    command works on Powerwall 2 and 3 alike, so hardware must NOT gate
-    it — otherwise PW2 v1r users lose a control they have today.
+    Fail-closed like the Console gate (``tedapi_mode === 'v1r'``): the RSA
+    key marks a v1r connection, but an unknown/unresolved mode (cold start,
+    cloud failover) must NOT pass — otherwise islanding commands could be
+    dispatched on a transport that cannot sign them. The library's signed
+    islanding command works on Powerwall 2 and 3 alike, so hardware must
+    NOT gate it — otherwise PW2 v1r users lose a control they have today.
     Shared by discovery (which buttons to announce) and the control loop
     (which islanding commands to accept).
     """
@@ -154,9 +157,8 @@ def is_v1r_gateway(gateway: Any, data: Any) -> bool:
         if gateway is None or not getattr(gateway, "rsa_key_configured", False):
             return False
         if data is None:
-            return True
-        mode = getattr(data, "tedapi_mode", None)
-        return mode in (None, "v1r")
+            return False
+        return getattr(data, "tedapi_mode", None) == "v1r"
     except Exception:
         return False
 
@@ -164,8 +166,9 @@ def is_v1r_gateway(gateway: Any, data: Any) -> bool:
 def discovery_signature(
     strings: Optional[Dict[str, Any]],
     vitals: Optional[Dict[str, Any]],
-    controls_enabled: bool = False,
+    controls: int = 0,
     is_v1r: bool = False,
+    grid_capable: bool = False,
 ) -> frozenset:
     """The optional (data-dependent) entities a snapshot would announce.
 
@@ -173,17 +176,21 @@ def discovery_signature(
     reports them. The publisher compares this signature with what it has
     already announced, so a family first seen on a later poll (e.g. after the
     first poll's vitals timed out) still gets discovered.
-    The v1r capability is tracked the same way: if it flips between polls
+    The control capability is tracked the same way: if the MQTT_CONTROLS
+    mask, the v1r capability or the grid capability flips between polls
     (e.g. transport mode resolving late), discovery re-fires so the
-    islanding buttons appear.
+    matching buttons appear (or disappear).
     """
+    from app.config import MQTT_CONTROLS_ALL  # late import, avoids cycles
+
+    controls &= MQTT_CONTROLS_ALL
     signature = set()
     if isinstance(strings, dict):
         signature.update(("string", sid) for sid in strings)
     for din, cts in extract_remote_meters(vitals).items():
         signature.update(("remote_meter", din, ct) for ct in cts)
-    if controls_enabled:
-        signature.add(("controls", bool(is_v1r)))
+    if controls:
+        signature.add(("controls", controls, bool(is_v1r), bool(grid_capable)))
     return frozenset(signature)
 
 
@@ -206,8 +213,9 @@ def build_discovery_payloads(
     version: Optional[str] = None,
     string_ids: Optional[Sequence[str]] = None,
     remote_meters: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
-    controls_enabled: bool = False,
+    controls: int = 0,
     is_v1r: bool = False,
+    grid_capable: bool = False,
 ) -> list[tuple[str, str]]:
     """Build all HA auto-discovery (topic, payload) pairs for a gateway.
 
@@ -226,10 +234,15 @@ def build_discovery_payloads(
                        extract_remote_meters(pw.vitals()) - {din: {ct_index:
                        {metric: value}}}.  When provided, per-CT sensors are
                        added so HA auto-discovers each wireless CT meter.
-        controls_enabled: When True, HA control entities (number/select/switch/button)
-                       are added (requires MQTT_CONTROLS_ENABLED + PW_CONTROL_SECRET).
+        controls: MQTT_CONTROLS bitmask — only entities whose bit is set
+                        are added (0 = monitoring only). Grid controls additionally
+                        require grid_capable (the gateway must actually execute
+                        them); islanding buttons require is_v1r.
         is_v1r:    When True, islanding buttons (Go Off Grid/Reconnect) are added
-                       (v1r transport, PW2 + PW3, like the WebGUI `islanding` section).
+                        (v1r transport, PW2 + PW3, like the WebGUI `islanding` section).
+        grid_capable: When True, grid_charging/grid_export controls are added
+                        (cloud, FleetAPI, hybrid-cloud or v1r connection — the
+                        local/TEDAPI-full setters are logging stubs).
 
     Returns:
         List of (topic, json_payload_str) tuples, one per sensor/binary sensor/control.
@@ -620,39 +633,59 @@ def build_discovery_payloads(
         ),
     ]
 
-    if controls_enabled:
-        results.extend([
-            number(
-                "reserve_control", "Backup Reserve Control",
-                f"{data_prefix}/reserve",
-                f"{data_prefix}/control/reserve/set",
-                unit="%",
-                icon="mdi:battery-lock",
-                min_val=0, max_val=100, step=1,
-            ),
-            select(
-                "mode_control", "Operation Mode Control",
-                f"{data_prefix}/mode",
-                f"{data_prefix}/control/mode/set",
-                options=["self_consumption", "backup", "autonomous"],
-                icon="mdi:cog",
-            ),
-            switch(
-                "grid_charging_control", "Grid Charging Control",
-                f"{data_prefix}/grid_charging",
-                f"{data_prefix}/control/grid_charging/set",
-                icon="mdi:battery-charging-outline",
-            ),
-            select(
-                "grid_export_control", "Grid Export Control",
-                f"{data_prefix}/grid_export",
-                f"{data_prefix}/control/grid_export/set",
-                options=["battery_ok", "pv_only", "never"],
-                icon="mdi:transmission-tower-export",
-            ),
-        ])
+    if controls:
+        from app.config import (
+            MQTT_CONTROL_GRID_CHARGING,
+            MQTT_CONTROL_GRID_EXPORT,
+            MQTT_CONTROL_ISLANDING,
+            MQTT_CONTROL_MODE,
+            MQTT_CONTROL_RESERVE,
+        )
+
+        if controls & MQTT_CONTROL_RESERVE:
+            results.append(
+                number(
+                    "reserve_control", "Backup Reserve Control",
+                    f"{data_prefix}/reserve",
+                    f"{data_prefix}/control/reserve/set",
+                    unit="%",
+                    icon="mdi:battery-lock",
+                    min_val=0, max_val=100, step=1,
+                )
+            )
+        if controls & MQTT_CONTROL_MODE:
+            results.append(
+                select(
+                    "mode_control", "Operation Mode Control",
+                    f"{data_prefix}/mode",
+                    f"{data_prefix}/control/mode/set",
+                    options=["self_consumption", "backup", "autonomous"],
+                    icon="mdi:cog",
+                )
+            )
+        # Grid setters are logging stubs on connections that cannot execute
+        # them (local/hybrid, TEDAPI full) — announce only when capable.
+        if (controls & MQTT_CONTROL_GRID_CHARGING) and grid_capable:
+            results.append(
+                switch(
+                    "grid_charging_control", "Grid Charging Control",
+                    f"{data_prefix}/grid_charging",
+                    f"{data_prefix}/control/grid_charging/set",
+                    icon="mdi:battery-charging-outline",
+                )
+            )
+        if (controls & MQTT_CONTROL_GRID_EXPORT) and grid_capable:
+            results.append(
+                select(
+                    "grid_export_control", "Grid Export Control",
+                    f"{data_prefix}/grid_export",
+                    f"{data_prefix}/control/grid_export/set",
+                    options=["battery_ok", "pv_only", "never"],
+                    icon="mdi:transmission-tower-export",
+                )
+            )
         # Islanding buttons like the WebGUI gate — v1r transport (PW2 + PW3)
-        if is_v1r:
+        if (controls & MQTT_CONTROL_ISLANDING) and is_v1r:
             results.extend([
                 button(
                     "go_off_grid", "Go Off Grid",
