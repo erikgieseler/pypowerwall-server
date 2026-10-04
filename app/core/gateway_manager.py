@@ -64,6 +64,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import time
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Set
@@ -268,10 +269,9 @@ class GatewayManager:
         # alongside a TEDAPI gateway. This enables hybrid operation:
         # TEDAPI for fast local reads, cloud for control writes.
         self._cloud_control: Optional[pypowerwall.Powerwall] = None
-        # Gateway id the shared cloud connection was built from. It is
-        # created with that gateway's email/authpath (auto_select, no
-        # explicit site), so it is only bound to that site: writers must
-        # use it solely for this gateway, never for another one.
+        # Gateway the shared cloud connection writes for, set only when its
+        # Tesla site is unambiguous (see _cloud_site_unambiguous). MQTT
+        # controls use the shared connection for this gateway and no other.
         self._cloud_control_gateway_id: Optional[str] = None
 
         # Hybrid cloud-link health (issue #87): the shared cloud connection
@@ -625,6 +625,11 @@ class GatewayManager:
                     "fleetapi": config.fleetapi,
                     "auto_select": True,
                 }
+                if settings.siteid:
+                    # PW_SITEID picks the site on multi-site accounts. The
+                    # cloud client compares it with integer site ids.
+                    siteid = str(settings.siteid).strip()
+                    cloud_kwargs["siteid"] = int(siteid) if siteid.isdigit() else siteid
                 self._cloud_control = await asyncio.wait_for(
                     loop.run_in_executor(
                         self._executor,
@@ -632,9 +637,8 @@ class GatewayManager:
                     ),
                     timeout=15.0,
                 )
-                # Bound to the building gateway's site (built from its
-                # email/authpath): writers must only use it for config.id.
-                self._cloud_control_gateway_id = config.id
+                if await self._cloud_site_unambiguous(config.fleetapi):
+                    self._cloud_control_gateway_id = config.id
                 logger.info(
                     "Cloud control connection established for write operations"
                 )
@@ -643,6 +647,44 @@ class GatewayManager:
                 logger.warning(
                     f"Cloud control connection failed (control will be unavailable): {e}"
                 )
+
+    async def _cloud_site_unambiguous(self, fleetapi: bool) -> bool:
+        """True when the shared cloud connection's Tesla site is certain.
+
+        That is when PW_SITEID is set, a site was chosen with pypowerwall
+        setup (the site file in the auth path), the connection is FleetAPI
+        (its site comes from its own setup), or the account has one site.
+        Otherwise the cloud client defaults to the account's first site,
+        which may not be this gateway's, so MQTT controls don't use it.
+        Only MQTT controls use the binding, so without them nothing is checked.
+        """
+        from app.config import settings
+
+        if not settings.mqtt_controls_available:
+            return False
+        client = getattr(self._cloud_control, "client", None)
+        sitefile = getattr(client, "sitefile", None)
+        if settings.siteid or fleetapi or (sitefile and os.path.exists(sitefile)):
+            return True
+        getsites = getattr(client, "getsites", None)
+        sites = None
+        if getsites is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                sites = await asyncio.wait_for(
+                    loop.run_in_executor(self._executor, getsites), timeout=15.0
+                )
+            except Exception:
+                pass
+        if isinstance(sites, list) and len(sites) == 1:
+            return True
+        logger.warning(
+            "Hybrid cloud connection: the Tesla account has %s sites and no "
+            "site is selected, so MQTT controls won't use it. Set PW_SITEID "
+            "to this gateway's energy site id.",
+            len(sites) if isinstance(sites, list) else "an unknown number of",
+        )
+        return False
 
     async def _cancel_task_with_retry(
         self,

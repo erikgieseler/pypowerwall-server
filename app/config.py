@@ -396,41 +396,37 @@ class Settings(BaseSettings):
     # 2 mode, 4 grid_charging, 8 grid_export, 16 islanding; e.g. 15 = all
     # but islanding, 31 = all). Islanding needs its own explicit bit.
 
-    @field_validator("mqtt_controls")
+    @field_validator("mqtt_controls", mode="before")
     @classmethod
-    def _sanitize_control_bits(cls, v: int) -> int:
-        if v < 0:
-            logger.warning(
-                f"Ignoring invalid MQTT_CONTROLS={v}: must be 0-31, using 0 "
-                "(monitoring only)"
-            )
-            return 0
-        unknown = v & ~MQTT_CONTROLS_ALL
-        if unknown:
-            logger.warning(
-                f"Ignoring unknown MQTT_CONTROLS bits {unknown:#x}: "
-                f"valid bits are 1/2/4/8/16, using {v & MQTT_CONTROLS_ALL}"
-            )
-        return v & MQTT_CONTROLS_ALL
+    def _parse_control_bits(cls, v) -> int:
+        """Fail closed: anything but an integer 0-31 means monitoring only.
 
-    @property
-    def mqtt_controls_mask(self) -> int:
-        """Effective MQTT control bitmask (unknown bits stripped)."""
-        v = self.mqtt_controls
-        return (v & MQTT_CONTROLS_ALL) if v > 0 else 0
+        An invalid value must neither stop the server (monitoring keeps
+        running) nor enable controls the user didn't spell out.
+        """
+        text = str(v).strip()
+        if text == "":
+            return 0  # unset, e.g. MQTT_CONTROLS= in a compose file
+        if text.isdigit() and 0 <= int(text) <= MQTT_CONTROLS_ALL:
+            return int(text)
+        logger.error(
+            f"Invalid MQTT_CONTROLS={text!r}: must be an integer from 0 to "
+            f"{MQTT_CONTROLS_ALL}; MQTT controls stay off (monitoring only)"
+        )
+        return 0
 
     def mqtt_control_names(self) -> List[str]:
         """Names of the enabled MQTT controls, for startup logging."""
         return [
             _MQTT_CONTROL_NAMES[bit]
             for bit in sorted(_MQTT_CONTROL_NAMES)
-            if self.mqtt_controls_mask & bit
+            if self.mqtt_controls & bit
         ]
 
     def mqtt_control_allowed(self, control: str) -> bool:
         """True when the MQTT_CONTROLS bitmask enables this control."""
         return bool(
-            self.mqtt_controls_mask & MQTT_CONTROL_BITS.get(control, 0)
+            self.mqtt_controls & MQTT_CONTROL_BITS.get(control, 0)
         )
 
     @property
@@ -440,19 +436,17 @@ class Settings(BaseSettings):
 
     @property
     def mqtt_controls_available(self) -> bool:
-        """MQTT controls need authenticated broker access: without
-        MQTT_USERNAME/MQTT_PASSWORD the broker cannot enforce the
-        pypowerwall/+/control/# ACL that control trust relies on.
+        """MQTT controls are on: bits set, PW_CONTROL_SECRET set, and we
+        connect with MQTT_USERNAME/MQTT_PASSWORD.
 
-        Note this only checks that *we* connect with credentials — it
-        cannot tell whether the broker rejects anonymous clients or
-        enforces a topic ACL, so the broker must be configured for both
-        (see MQTT.md)."""
+        This only checks our own credentials. It can't tell whether the
+        broker rejects anonymous clients or enforces the control-topic ACL;
+        the broker must do both (see MQTT.md)."""
         return bool(
             self.mqtt_host
             and self.mqtt_username
             and self.mqtt_password
-            and self.mqtt_controls_mask != 0
+            and self.mqtt_controls != 0
             and self.control_secret
         )
 

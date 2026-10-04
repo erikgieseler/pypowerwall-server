@@ -1,1461 +1,709 @@
 """
-Tests for MQTT HA controls autodiscovery (broker-trust, no token in payload).
+Tests for MQTT controls (opt-in MQTT_CONTROLS bitmask, broker trust).
 
-Covers:
-- build_discovery_payloads(controls=31) adds control entities per bit
-- Controls are absent when MQTT_CONTROLS=0 or PW_CONTROL_SECRET missing
-- Controls require broker auth (MQTT_USERNAME + MQTT_PASSWORD)
-- Control topics are publishable via _control_message_loop with validation
-- Reserve rejects booleans (bool is an int subclass)
-- Islanding is rejected without confirmed v1r transport, accepted for PW2 + PW3 v1r
-- Discovery re-fires when v1r capability arrives late (cold start)
-- Cloud-mode gateways are driven on their own connection first
+Every safety guard has a test that fails when the guard is removed. The
+control loop runs against aiomqtt's real MessagesIterator, and discovery runs
+through publish_gateway() with real Gateway/GatewayStatus objects, so
+capability checks are exercised end to end rather than passed in as flags.
 """
 import asyncio
 import json
+import logging
+import sys
+import time
+import types
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiomqtt import Message
+from aiomqtt.client import MessagesIterator
 
-from app.mqtt.ha_discovery import build_discovery_payloads
-from app.mqtt.publisher import MqttPublisher
+from app.config import settings
+from app.core.gateway_manager import gateway_manager
 from app.models.gateway import Gateway, GatewayStatus, PowerwallData
+from app.mqtt.ha_discovery import build_discovery_payloads, control_config_topics
+from app.mqtt.publisher import CONTROL_COALESCE_WINDOW_S, MqttPublisher
+
+LOGGER = "app.mqtt.publisher"
+
+# Gateway id -> (Gateway kwargs, tedapi_mode). "hybrid" is bound to the
+# shared cloud connection; "full" (TEDAPI full) can't write anything.
+GATEWAYS = {
+    "cloud": ({"cloud_mode": True}, "Cloud"),
+    "fleet": ({"fleetapi": True}, "FleetAPI"),
+    "hybrid": ({"host": "10.0.0.2"}, "full"),
+    "v1r": ({"host": "10.0.0.3", "rsa_key_configured": True}, "v1r"),
+    "full": ({"host": "10.0.0.4"}, "full"),
+}
+VALUE_CONTROLS = ["grid_charging_control", "grid_export_control", "mode_control", "reserve_control"]
+ISLANDING = ["go_off_grid", "reconnect_grid"]
 
 
-def test_controls_disabled_no_extra_entities():
-    results = build_discovery_payloads(
-        gateway_id="home",
-        gateway_name="Home",
-        topic_prefix="pypowerwall",
-        ha_prefix="homeassistant",
-        controls=0,
+def _status(gateway, tedapi_mode):
+    data = PowerwallData(
+        tedapi_mode=tedapi_mode, mode="self_consumption", reserve=20.0,
+        grid_charging=True, grid_export="pv_only", grid_status="UP",
     )
-    assert len(results) == 23
+    return GatewayStatus(gateway=gateway, data=data, online=True, last_updated=time.time())
 
 
-def test_controls_mask_adds_entities():
-    # Without v1r transport: 4 controls (no islanding); grid setters need
-    # a capable connection (cloud/FleetAPI, bound hybrid cloud, or v1r)
-    results = build_discovery_payloads(
-        gateway_id="home",
-        gateway_name="Home",
-        topic_prefix="pypowerwall",
-        ha_prefix="homeassistant",
-        controls=31,
-        grid_capable=True,
-    )
-    assert len(results) == 27
-    topics = {t for t, _ in results}
-    assert "homeassistant/number/pypowerwall_home_reserve_control/config" in topics
-    assert "homeassistant/select/pypowerwall_home_mode_control/config" in topics
-    assert "homeassistant/switch/pypowerwall_home_grid_charging_control/config" in topics
-    assert "homeassistant/select/pypowerwall_home_grid_export_control/config" in topics
-    assert "homeassistant/button/pypowerwall_home_go_off_grid/config" not in topics
-
-    # With v1r transport (PW2 or PW3): +2 islanding buttons
-    results_v1r = build_discovery_payloads(
-        gateway_id="home",
-        gateway_name="Home",
-        topic_prefix="pypowerwall",
-        ha_prefix="homeassistant",
-        controls=31,
-        is_v1r=True,
-        grid_capable=True,
-    )
-    assert len(results_v1r) == 29
-    topics_v1r = {t for t, _ in results_v1r}
-    assert "homeassistant/button/pypowerwall_home_go_off_grid/config" in topics_v1r
-    assert "homeassistant/button/pypowerwall_home_reconnect_grid/config" in topics_v1r
+@pytest.fixture
+def env(monkeypatch):
+    """Controls fully enabled (all bits, broker credentials, secret)."""
+    for name, value in {
+        "mqtt_host": "localhost",
+        "mqtt_username": "pypowerwall",
+        "mqtt_password": "secret",
+        "control_secret": "secret",
+        "mqtt_controls": 31,
+        "mqtt_topic_prefix": "pypowerwall",
+        "mqtt_ha_prefix": "homeassistant",
+        "mqtt_ha_discovery": True,
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    return settings
 
 
-def test_controls_bits_gate_entities():
-    # Only bits in the mask are announced (islanding needs its own bit)
-    base = dict(
-        gateway_id="home",
-        gateway_name="Home",
-        topic_prefix="pypowerwall",
-        ha_prefix="homeassistant",
-        is_v1r=True,
-        grid_capable=True,
-    )
-    topics = {t for t, _ in build_discovery_payloads(**base, controls=1)}
-    assert "homeassistant/number/pypowerwall_home_reserve_control/config" in topics
-    assert "homeassistant/select/pypowerwall_home_mode_control/config" not in topics
-
-    # Mask without the islanding bit: no buttons despite v1r transport
-    topics = {t for t, _ in build_discovery_payloads(**base, controls=15)}
-    assert "homeassistant/button/pypowerwall_home_go_off_grid/config" not in topics
-
-    # Grid controls need a capable connection even with the bit set
-    no_grid = dict(base, grid_capable=False)
-    topics = {t for t, _ in build_discovery_payloads(**no_grid, controls=12)}
-    assert "homeassistant/switch/pypowerwall_home_grid_charging_control/config" not in topics
-    assert "homeassistant/select/pypowerwall_home_grid_export_control/config" not in topics
+@pytest.fixture
+def gm(monkeypatch):
+    """gateway_manager with the five GATEWAYS and recording control mocks."""
+    monkeypatch.setattr(gateway_manager, "gateways", {})
+    monkeypatch.setattr(gateway_manager, "cache", {})
+    for gid, (kwargs, mode) in GATEWAYS.items():
+        gw = Gateway(id=gid, name=gid, online=True, **kwargs)
+        gateway_manager.gateways[gid] = gw
+        gateway_manager.cache[gid] = _status(gw, mode)
+    monkeypatch.setattr(gateway_manager, "_cloud_control", object())
+    monkeypatch.setattr(gateway_manager, "_cloud_control_gateway_id", "hybrid")
+    monkeypatch.setattr(gateway_manager, "local_control", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(gateway_manager, "cloud_control", AsyncMock(return_value={"ok": True}))
+    return gateway_manager
 
 
-def test_reserve_control_payload():
-    results = {t: json.loads(p) for t, p in build_discovery_payloads("home", "Home", "pypowerwall", "homeassistant", controls=31, grid_capable=True)}
-    payload = results["homeassistant/number/pypowerwall_home_reserve_control/config"]
-    assert payload["command_topic"] == "pypowerwall/home/control/reserve/set"
-    assert payload["state_topic"] == "pypowerwall/home/reserve"
-    assert payload["min"] == 0
-    assert payload["max"] == 100
-    assert payload["step"] == 1
+class FakeClient:
+    """aiomqtt.Client stand-in: aiomqtt's real MessagesIterator over a queue."""
+
+    def __init__(self):
+        self._loop = asyncio.get_running_loop()
+        self._queue = asyncio.Queue()
+        self._disconnected = self._loop.create_future()
+        self.messages = MessagesIterator(self)
+        self.published = []
+
+    async def publish(self, topic, payload=None, qos=0, retain=False):
+        self.published.append((topic, payload, retain))
+
+    async def subscribe(self, *args, **kwargs):
+        pass
+
+    def deliver(self, topic, payload, retain=False):
+        if isinstance(payload, (dict, list)):
+            payload = json.dumps(payload)
+        if isinstance(payload, str):
+            payload = payload.encode()
+        self._queue.put_nowait(Message(topic, payload, 1, retain, 1, None))
 
 
-@pytest.mark.asyncio
-async def test_control_message_reserve_valid(monkeypatch):
-    from app.config import settings
-    from app.core.gateway_manager import gateway_manager
-
-    monkeypatch.setattr(settings, "mqtt_host", "localhost")
-    monkeypatch.setattr(settings, "mqtt_topic_prefix", "pypowerwall")
-    monkeypatch.setattr(settings, "mqtt_controls", 31)
-    monkeypatch.setattr(settings, "control_secret", "secret")
-
-    gw = Gateway(id="home", name="Home", host="1.1.1.1", online=True)
-    gateway_manager.gateways["home"] = gw
-    gateway_manager._cloud_control = None
-
-    mock_local = AsyncMock(return_value={"ok": True})
-    monkeypatch.setattr(gateway_manager, "local_control", mock_local)
-    monkeypatch.setattr(gateway_manager, "cloud_control", AsyncMock(return_value=None))
-
+async def run_commands(*messages):
+    """Deliver (topic, payload[, retain]) messages, run the loop until handled."""
     pub = MqttPublisher()
-
-    class FakeMsg:
-        def __init__(self, topic, payload, retain=False):
-            self.topic = MagicMock()
-            self.topic.value = topic
-            self.payload = payload.encode()
-            self.retain = retain
-
-    class FakeClient:
-        def __init__(self):
-            self._queue = asyncio.Queue()
-
-        async def subscribe(self, topic, qos=1):
-            pass
-
-        @property
-        def messages(self):
-            return self
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            return await self._queue.get()
-
-        async def put(self, msg):
-            await self._queue.put(msg)
-
     client = FakeClient()
+    for message in messages:
+        client.deliver(*message)
     task = asyncio.create_task(pub._control_message_loop(client))
-    await asyncio.sleep(0.05)
-    await client.put(FakeMsg("pypowerwall/home/control/reserve/set", json.dumps({"value": 50})))
-    await asyncio.sleep(0.2)
-    mock_local.assert_called_once()
-    assert mock_local.call_args[0][1] == "set_reserve"
-
-    # Invalid reserve should not call
-    mock_local.reset_mock()
-    await client.put(FakeMsg("pypowerwall/home/control/reserve/set", json.dumps({"value": 150})))
-    await asyncio.sleep(0.2)
-    mock_local.assert_not_called()
-
+    for _ in range(100):
+        await asyncio.sleep(0.02)
+        if client._queue.empty():
+            break
+    await asyncio.sleep(CONTROL_COALESCE_WINDOW_S + 0.1)
+    pub._shutdown = True
     task.cancel()
     try:
         await task
     except asyncio.CancelledError:
         pass
-    del gateway_manager.gateways["home"]
+    return client
 
 
-@pytest.mark.asyncio
-async def test_control_message_invalid_json_ignored(monkeypatch):
-    from app.config import settings
-    from app.core.gateway_manager import gateway_manager
-
-    monkeypatch.setattr(settings, "mqtt_host", "localhost")
-    monkeypatch.setattr(settings, "mqtt_topic_prefix", "pypowerwall")
-
-    pub = MqttPublisher()
-
-    class FakeMsg:
-        def __init__(self, topic, payload):
-            self.topic = MagicMock()
-            self.topic.value = topic
-            self.payload = payload.encode()
-            self.retain = False
-
-    class FakeClient:
-        def __init__(self):
-            self._queue = asyncio.Queue()
-
-        async def subscribe(self, topic, qos=1):
-            pass
-
-        @property
-        def messages(self):
-            return self
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            return await self._queue.get()
-
-        async def put(self, msg):
-            await self._queue.put(msg)
-
-    client = FakeClient()
-    task = asyncio.create_task(pub._control_message_loop(client))
-    await asyncio.sleep(0.05)
-    # malformed JSON should be ignored, not crash
-    await client.put(FakeMsg("pypowerwall/home/control/mode/set", "not json"))
-    await asyncio.sleep(0.2)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+def cmd(gateway, control, payload, retain=False):
+    return (f"pypowerwall/{gateway}/control/{control}/set", payload, retain)
 
 
-def test_mqtt_controls_require_broker_auth(monkeypatch):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "mqtt_host", "localhost")
-    monkeypatch.setattr(settings, "mqtt_controls", 31)
-    monkeypatch.setattr(settings, "control_secret", "secret")
-    # No broker user/password -> controls unavailable (open broker)
-    monkeypatch.setattr(settings, "mqtt_username", None)
-    monkeypatch.setattr(settings, "mqtt_password", None)
-    assert settings.mqtt_controls_available is False
-    # Username alone is not enough (ACLs are enforced per user+password)
-    monkeypatch.setattr(settings, "mqtt_username", "user")
-    assert settings.mqtt_controls_available is False
-    monkeypatch.setattr(settings, "mqtt_password", "pass")
-    assert settings.mqtt_controls_available is True
-    # Mask 0 (monitoring only) disables even with full credentials
-    monkeypatch.setattr(settings, "mqtt_controls", 0)
-    assert settings.mqtt_controls_available is False
-    # Missing secret disables even with bits + broker auth
-    monkeypatch.setattr(settings, "mqtt_controls", 31)
-    monkeypatch.setattr(settings, "control_secret", None)
-    assert settings.mqtt_controls_available is False
+def calls(mock):
+    return [(c.args, c.kwargs) for c in mock.call_args_list]
 
 
-def test_mqtt_controls_mask_names(monkeypatch):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "mqtt_controls", 15)
-    assert settings.mqtt_control_names() == [
-        "reserve", "mode", "grid_charging", "grid_export",
-    ]
-    assert settings.mqtt_control_allowed("islanding") is False
-    assert settings.mqtt_control_allowed("reserve") is True
-    monkeypatch.setattr(settings, "mqtt_controls", 63)
-    assert settings.mqtt_controls_mask == 31
-    assert settings.mqtt_control_allowed("nope") is False
+# --- Configuration -----------------------------------------------------------
 
 
-def test_mqtt_controls_env_sanitize(monkeypatch, caplog):
-    """Validator strips unknown bits / negatives with a warning (fail-closed)."""
-    import logging
-
+@pytest.mark.parametrize("raw, expected", [
+    ("15", 15), (" 31 ", 31), ("0", 0), ("", 0),
+    ("reserve,mode", 0), ("48", 0), ("-1", 0), ("3.5", 0), ("32", 0),
+])
+def test_mqtt_controls_fails_closed(monkeypatch, caplog, raw, expected):
+    """Anything but an integer 0-31 means monitoring only, without stopping
+    the server (48 = 16 + an invalid bit must not enable islanding)."""
     from app.config import Settings
 
-    monkeypatch.setenv("MQTT_CONTROLS", "63")
-    with caplog.at_level(logging.WARNING, logger="app.config"):
-        settings = Settings()
-    assert settings.mqtt_controls == 31
-    assert settings.mqtt_control_names() == [
-        "reserve", "mode", "grid_charging", "grid_export", "islanding",
-    ]
-    assert any("unknown" in r.getMessage().lower() for r in caplog.records)
-
-    monkeypatch.setenv("MQTT_CONTROLS", "-5")
-    settings = Settings()
-    assert settings.mqtt_controls == 0
-    assert settings.mqtt_controls_available is False
+    monkeypatch.setenv("MQTT_CONTROLS", raw)
+    with caplog.at_level(logging.ERROR, logger="app.config"):
+        assert Settings().mqtt_controls == expected
+    invalid = raw.strip() not in ("", "0") and expected == 0
+    assert any("Invalid MQTT_CONTROLS" in r.getMessage() for r in caplog.records) == invalid
 
 
-class _Msg:
-    def __init__(self, topic, payload, retain=False):
-        self.topic = MagicMock()
-        self.topic.value = topic
-        self.payload = payload.encode()
-        self.retain = retain
+@pytest.mark.parametrize("missing", ["mqtt_username", "mqtt_password", "control_secret", "mqtt_controls"])
+def test_controls_need_credentials_secret_and_bits(env, monkeypatch, missing):
+    assert settings.mqtt_controls_available
+    monkeypatch.setattr(settings, missing, 0 if missing == "mqtt_controls" else None)
+    assert not settings.mqtt_controls_available
 
 
-class _Client:
-    def __init__(self):
-        self._queue = asyncio.Queue()
-        self.publish = AsyncMock()
-
-    async def subscribe(self, topic, qos=1):
-        pass
-
-    @property
-    def messages(self):
-        return self
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        return await self._queue.get()
-
-    async def put(self, msg):
-        await self._queue.put(msg)
+def test_control_names(env, monkeypatch):
+    monkeypatch.setattr(settings, "mqtt_controls", 17)
+    assert settings.mqtt_control_names() == ["reserve", "islanding"]
+    assert settings.mqtt_control_allowed("islanding")
+    assert not settings.mqtt_control_allowed("mode")
 
 
-_USE_OK_RESULT = object()
+# --- Discovery -----------------------------------------------------------------
 
 
-async def _run_control_messages(monkeypatch, gateway_id, gw_kwargs, messages,
-                                cloud_result=None, hybrid=None, mask=31,
-                                bound_id=None, local_result=_USE_OK_RESULT,
-                                local_effect=None):
-    """Feed control messages through the loop; return (mock_local, mock_cloud)."""
-    from app.config import settings
-    from app.core.gateway_manager import gateway_manager
-
-    monkeypatch.setattr(settings, "mqtt_topic_prefix", "pypowerwall")
-    monkeypatch.setattr(settings, "mqtt_controls", mask)
-    gw = Gateway(id=gateway_id, name=gateway_id, online=True, **gw_kwargs)
-    gateway_manager.gateways[gateway_id] = gw
-    if local_effect is not None:
-        mock_local = AsyncMock(side_effect=local_effect)
-    else:
-        mock_local = AsyncMock(
-            return_value={"ok": True}
-            if local_result is _USE_OK_RESULT
-            else local_result
-        )
-    mock_cloud = AsyncMock(return_value=cloud_result)
-    monkeypatch.setattr(gateway_manager, "local_control", mock_local)
-    monkeypatch.setattr(gateway_manager, "cloud_control", mock_cloud)
-    if hybrid is None:
-        hybrid = cloud_result is not None
-    monkeypatch.setattr(gateway_manager, "_cloud_control",
-                        object() if hybrid else None)
-    monkeypatch.setattr(gateway_manager, "_cloud_control_gateway_id", bound_id)
-
-    pub = MqttPublisher()
-    client = _Client()
-    task = asyncio.create_task(pub._control_message_loop(client))
-    await asyncio.sleep(0.05)
-    for topic, payload in messages:
-        await client.put(_Msg(topic, payload))
-    await asyncio.sleep(0.3)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    finally:
-        del gateway_manager.gateways[gateway_id]
-    return mock_local, mock_cloud, client
-
-
-@pytest.mark.asyncio
-async def test_control_message_reserve_rejects_bool(monkeypatch):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "mqtt_topic_prefix", "pypowerwall")
-
-    # True/False must not pass as 1/0 (bool subclasses int)
-    for bad in (True, False):
-        mock_local, _, _ = await _run_control_messages(
-            monkeypatch, "home", {"host": "1.1.1.1"},
-            [("pypowerwall/home/control/reserve/set", json.dumps({"value": bad}))],
-        )
-        mock_local.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_control_message_islanding_needs_v1r(monkeypatch):
-    from app.config import settings
-    from app.core.gateway_manager import gateway_manager
-
-    monkeypatch.setattr(settings, "mqtt_topic_prefix", "pypowerwall")
-    payload = json.dumps({"action": "off_grid", "confirm": True})
-
-    # Plain TEDAPI gateway (no RSA key): islanding rejected
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "plain", {"host": "1.1.1.1"},
-        [("pypowerwall/plain/control/islanding/set", payload)],
+def _announced(**kwargs):
+    payloads = build_discovery_payloads("home", "Home", "pypowerwall", "homeassistant", **kwargs)
+    return sorted(
+        json.loads(p)["unique_id"].split("home_", 1)[1]
+        for _, p in payloads
+        if "/control/" in json.loads(p).get("command_topic", "")
     )
-    mock_local.assert_not_called()
 
-    # RSA gateway but mode unknown (cold start, no status yet): fail closed
-    # like the Console gate (tedapi_mode === 'v1r') — rejected until the
-    # transport confirms v1r
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "cold", {"host": "1.1.1.1", "rsa_key_configured": True},
-        [("pypowerwall/cold/control/islanding/set", payload)],
+
+def test_discovery_follows_bits_and_capability():
+    assert _announced(controls=0, writable=True, is_v1r=True) == []
+    assert _announced(controls=31, writable=True, is_v1r=True) == sorted(VALUE_CONTROLS + ISLANDING)
+    # Islanding needs its own bit, even on v1r
+    assert _announced(controls=15, writable=True, is_v1r=True) == VALUE_CONTROLS
+    # Value controls need a gateway that can write them
+    assert _announced(controls=31, writable=False, is_v1r=False) == []
+    assert _announced(controls=1, writable=True) == ["reserve_control"]
+    assert _announced(controls=2, writable=True) == ["mode_control"]
+    assert _announced(controls=4, writable=True) == ["grid_charging_control"]
+    assert _announced(controls=8, writable=True) == ["grid_export_control"]
+    assert _announced(controls=16, writable=True, is_v1r=False) == []
+
+
+def test_control_config_topics_cover_every_control_entity():
+    payloads = build_discovery_payloads(
+        "home", "Home", "pypowerwall", "homeassistant", controls=31, writable=True, is_v1r=True
     )
-    mock_local.assert_not_called()
-
-    # RSA + confirmed PW2 hardware: still routed (library signs for both)
-    status = GatewayStatus(
-        gateway=Gateway(id="pw2", name="PW2", host="1.1.1.1",
-                        rsa_key_configured=True, online=True),
-        data=PowerwallData(pw3=False, tedapi_mode="v1r"),
-        online=True, last_updated=1.0,
-    )
-    monkeypatch.setattr(gateway_manager, "get_gateway", lambda gid: status)
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "pw2", {"host": "1.1.1.1", "rsa_key_configured": True},
-        [("pypowerwall/pw2/control/islanding/set", payload)],
-    )
-    mock_local.assert_called_once()
-    assert mock_local.call_args[0][1] == "go_off_grid"
-
-    # RSA + confirmed PW3 hardware: routed to go_off_grid
-    status = GatewayStatus(
-        gateway=Gateway(id="v1r", name="V1R", host="1.1.1.1",
-                        rsa_key_configured=True, online=True),
-        data=PowerwallData(pw3=True, tedapi_mode="v1r"), online=True, last_updated=1.0,
-    )
-    monkeypatch.setattr(gateway_manager, "get_gateway", lambda gid: status)
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "v1r", {"host": "1.1.1.1", "rsa_key_configured": True},
-        [("pypowerwall/v1r/control/islanding/set", payload)],
-    )
-    mock_local.assert_called_once()
-    assert mock_local.call_args[0][1] == "go_off_grid"
-
-    # Data definitively reports non-v1r transport: rejected despite RSA flag
-    status = GatewayStatus(
-        gateway=Gateway(id="full", name="Full", host="1.1.1.1",
-                        rsa_key_configured=True, online=True),
-        data=PowerwallData(pw3=True, tedapi_mode="full"),
-        online=True, last_updated=1.0,
-    )
-    monkeypatch.setattr(gateway_manager, "get_gateway", lambda gid: status)
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "full", {"host": "1.1.1.1", "rsa_key_configured": True},
-        [("pypowerwall/full/control/islanding/set", payload)],
-    )
-    mock_local.assert_not_called()
+    control_topics = {t for t, p in payloads if "/control/" in json.loads(p).get("command_topic", "")}
+    assert control_topics == set(control_config_topics("home", "homeassistant"))
 
 
-def test_discovery_signature_tracks_v1r():
-    from app.mqtt.ha_discovery import discovery_signature
-
-    off = discovery_signature(None, None, controls=31, is_v1r=False)
-    on = discovery_signature(None, None, controls=31, is_v1r=True)
-    assert ("controls", 31, False, False) in off
-    assert ("controls", 31, True, False) in on
-    assert not on <= off  # capability flip re-fires discovery
-    # Mask flip re-fires too (bit turned off removes entities)
-    fewer = discovery_signature(None, None, controls=15, is_v1r=True)
-    assert not fewer <= on
-    # Unknown bits are sanitized away (same state as the masked value)
-    assert discovery_signature(None, None, controls=63) == discovery_signature(
-        None, None, controls=31
-    )
-    # Controls disabled: no tracking key (unchanged legacy behavior)
-    assert discovery_signature(None, None) == frozenset()
+def test_reserve_entity_payload():
+    payloads = dict(build_discovery_payloads(
+        "home", "Home", "pypowerwall", "homeassistant", controls=1, writable=True
+    ))
+    entity = json.loads(payloads["homeassistant/number/pypowerwall_home_reserve_control/config"])
+    assert entity["command_topic"] == "pypowerwall/home/control/reserve/set"
+    assert entity["state_topic"] == "pypowerwall/home/reserve"
+    assert (entity["min"], entity["max"], entity["step"]) == (0, 100, 1)
 
 
-@pytest.mark.asyncio
-async def test_discovery_resent_when_v1r_arrives_late(monkeypatch):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "mqtt_host", "localhost")
-    monkeypatch.setattr(settings, "mqtt_username", "user")
-    monkeypatch.setattr(settings, "mqtt_password", "pass")
-    monkeypatch.setattr(settings, "mqtt_controls", 31)
-    monkeypatch.setattr(settings, "control_secret", "secret")
-    monkeypatch.setattr(settings, "mqtt_ha_discovery", True)
-    monkeypatch.setattr(settings, "mqtt_topic_prefix", "pypowerwall")
-    monkeypatch.setattr(settings, "mqtt_ha_prefix", "homeassistant")
-    monkeypatch.setattr(settings, "mqtt_qos", 1)
-    monkeypatch.setattr(settings, "mqtt_retain", True)
-
+async def _discover(gateway_ids):
+    """publish_gateway() per gateway; returns ({gw: announced}, {gw: cleared})."""
     pub = MqttPublisher()
     pub._client = AsyncMock()
     pub._connected = True
-    topics = []
+    sent = []
 
-    async def fake_safe(self, topic, payload, retain, qos):
-        topics.append(topic)
+    async def record(self, topic, payload, retain, qos):
+        sent.append((topic, payload))
 
-    monkeypatch.setattr(MqttPublisher, "_safe_publish", fake_safe)
-
-    def make_status(rsa, pw3, mode=None):
-        gw = Gateway(id="gw", name="GW", host="1.1.1.1",
-                     rsa_key_configured=rsa, online=True)
-        return GatewayStatus(
-            gateway=gw, data=PowerwallData(pw3=pw3, tedapi_mode=mode),
-            online=True, last_updated=1.0)
-
-    await pub.publish_gateway("gw", make_status(False, None))
-    first = len([t for t in topics if "homeassistant" in t])
-    assert first > 0
-
-    # Same capability: no re-send
-    topics.clear()
-    await pub.publish_gateway("gw", make_status(False, None))
-    assert [t for t in topics if "homeassistant" in t] == []
-
-    # v1r transport confirmed (PW2 hardware!): discovery re-fires with buttons
-    topics.clear()
-    await pub.publish_gateway("gw", make_status(True, False, "v1r"))
-    resent = [t for t in topics if "homeassistant" in t]
-    assert len(resent) > 0
-    assert any("go_off_grid" in t for t in resent)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(MqttPublisher, "_safe_publish", record)
+        for gid in gateway_ids:
+            await pub.publish_gateway(gid, gateway_manager.get_gateway(gid))
+    announced, cleared = {}, {}
+    for topic, payload in sent:
+        if topic not in sum((control_config_topics(g, "homeassistant") for g in gateway_ids), []):
+            continue
+        gid, suffix = topic.split("/")[2].split("pypowerwall_", 1)[1].split("_", 1)
+        (announced if payload else cleared).setdefault(gid, []).append(suffix)
+    return ({g: sorted(v) for g, v in announced.items()}, {g: sorted(v) for g, v in cleared.items()})
 
 
 @pytest.mark.asyncio
-async def test_controls_half_config_warns_once(monkeypatch, caplog):
-    import logging
-    import sys
-    import types
+async def test_discovery_per_gateway_type(env, gm):
+    """Through publish_gateway(): only controls the gateway can run."""
+    announced, _ = await _discover(GATEWAYS)
+    assert announced == {
+        "cloud": VALUE_CONTROLS,
+        "fleet": VALUE_CONTROLS,
+        "hybrid": VALUE_CONTROLS,
+        "v1r": sorted(VALUE_CONTROLS + ISLANDING),
+    }  # "full" (TEDAPI full) can't write anything
 
-    from app.config import settings
 
-    monkeypatch.setattr(settings, "mqtt_host", "localhost")
-    monkeypatch.setattr(settings, "mqtt_controls", 31)
-    monkeypatch.setattr(settings, "control_secret", "secret")
-    monkeypatch.setattr(settings, "mqtt_username", None)
-    monkeypatch.setattr(settings, "mqtt_password", None)
+@pytest.mark.asyncio
+async def test_unbound_hybrid_cloud_announces_nothing(env, gm, monkeypatch):
+    monkeypatch.setattr(gateway_manager, "_cloud_control_gateway_id", None)
+    announced, _ = await _discover(["hybrid"])
+    assert announced == {}
 
+
+@pytest.mark.asyncio
+async def test_unknown_transport_mode_is_not_v1r(env, gm):
+    """Fail closed: a v1r gateway whose mode isn't known yet (cold start,
+    cloud failover) gets no islanding buttons and no value controls."""
+    gw = gateway_manager.gateways["v1r"]
+    gateway_manager.cache["v1r"] = _status(gw, None)
+    announced, _ = await _discover(["v1r"])
+    assert announced == {}
+
+
+@pytest.mark.asyncio
+async def test_discovery_clears_controls_it_does_not_announce(env, gm, monkeypatch):
+    """Stateless: a fresh process (e.g. restarted with MQTT_CONTROLS=0)
+    clears every control entity, so none survive a restart."""
+    monkeypatch.setattr(settings, "mqtt_controls", 0)
+    announced, cleared = await _discover(["v1r"])
+    assert announced == {}
+    assert cleared == {"v1r": sorted(VALUE_CONTROLS + ISLANDING)}
+
+
+@pytest.mark.asyncio
+async def test_discovery_refires_when_v1r_resolves(env, gm):
     pub = MqttPublisher()
+    pub._client = AsyncMock()
+    pub._connected = True
+    gw = gateway_manager.gateways["v1r"]
+    gateway_manager.cache["v1r"] = _status(gw, None)
+    with pytest.MonkeyPatch.context() as mp:
+        sent = []
 
-    async def fake_safe(self, topic, payload, retain, qos):
-        return None
+        async def record(self, topic, payload, retain, qos):
+            sent.append((topic, payload))
 
-    monkeypatch.setattr(MqttPublisher, "_safe_publish", fake_safe)
+        mp.setattr(MqttPublisher, "_safe_publish", record)
+        await pub.publish_gateway("v1r", gateway_manager.get_gateway("v1r"))
+        sent.clear()
+        gateway_manager.cache["v1r"] = _status(gw, "v1r")
+        await pub.publish_gateway("v1r", gateway_manager.get_gateway("v1r"))
+    assert "homeassistant/button/pypowerwall_v1r_go_off_grid/config" in {
+        t for t, p in sent if p
+    }
+
+
+# --- Dispatch --------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_routing_one_path_per_gateway(env, gm):
+    """Each command runs on exactly one connection; the shared cloud only for
+    the gateway it is bound to; gateways that can't write get no call."""
+    await run_commands(*(cmd(g, "reserve", {"value": 30}) for g in GATEWAYS))
+    assert calls(gm.cloud_control) == [(("set_reserve", 30), {"timeout": 10.0})]
+    assert sorted(calls(gm.local_control)) == sorted(
+        ((g, "set_reserve", 30), {"timeout": 10.0}) for g in ("cloud", "fleet", "v1r")
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_retry_after_a_failed_write(env, gm):
+    gm.cloud_control.return_value = None  # e.g. timeout
+    await run_commands(cmd("hybrid", "mode", {"value": "backup"}))
+    assert gm.cloud_control.await_count == 1
+    assert gm.local_control.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_unbound_shared_cloud_is_never_used(env, gm, monkeypatch, caplog):
+    monkeypatch.setattr(gateway_manager, "_cloud_control_gateway_id", "cloud")
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await run_commands(cmd("hybrid", "reserve", {"value": 30}))
+    assert gm.cloud_control.await_count == 0 and gm.local_control.await_count == 0
+    assert "can't write it" in caplog.text
+
+
+@pytest.mark.parametrize("control, value, ok", [
+    ("reserve", 0, True), ("reserve", 100, True), ("reserve", 101, False),
+    ("reserve", -1, False), ("reserve", True, False), ("reserve", "30", False),
+    ("reserve", 30.5, False), ("reserve", None, False),
+    ("mode", "autonomous", True), ("mode", "eco", False), ("mode", ["backup"], False),
+    ("grid_charging", False, True), ("grid_charging", "true", False), ("grid_charging", 1, False),
+    ("grid_export", "pv_only", True), ("grid_export", "always", False), ("grid_export", True, False),
+])
+@pytest.mark.asyncio
+async def test_value_checks(env, gm, caplog, control, value, ok):
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await run_commands(cmd("cloud", control, {"value": value}))
+    assert (gm.local_control.await_count == 1) == ok
+    if not ok:
+        assert "invalid value" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_disabled_bit_is_rejected(env, gm, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "mqtt_controls", 15)  # everything but islanding
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await run_commands(cmd("v1r", "islanding", {"action": "off_grid", "confirm": True}))
+    assert gm.local_control.await_count == 0
+    assert "bit not set" in caplog.text
+
+
+@pytest.mark.parametrize("topic, payload, reason", [
+    ("pypowerwall/nope/control/reserve/set", {"value": 30}, "unknown gateway"),
+    ("pypowerwall/cloud/control/charge/set", {"value": 30}, "unknown control"),
+    ("pypowerwall/cloud/control/reserve/set/x", {"value": 30}, "malformed topic"),
+    ("pypowerwall/cloud/control/reserve/set", "not json", "not a JSON object"),
+    ("pypowerwall/cloud/control/reserve/set", [30], "not a JSON object"),
+    ("pypowerwall/cloud/control/reserve/set",
+     json.dumps({"value": 30, "pad": "x" * 2000}), "byte cap"),
+])
+@pytest.mark.asyncio
+async def test_bad_commands_are_rejected(env, gm, caplog, topic, payload, reason):
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await run_commands((topic, payload))
+    assert gm.local_control.await_count == 0
+    assert reason in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_multi_level_topic_prefix(env, gm, monkeypatch):
+    monkeypatch.setattr(settings, "mqtt_topic_prefix", "home/powerwall")
+    await run_commands(("home/powerwall/cloud/control/reserve/set", {"value": 30}),
+                       ("pypowerwall/cloud/control/reserve/set", {"value": 40}))
+    assert calls(gm.local_control) == [(("cloud", "set_reserve", 30), {"timeout": 10.0})]
+
+
+@pytest.mark.parametrize("payload", [
+    {"action": "off_grid"},
+    {"action": "off_grid", "confirm": False},
+    {"action": "off_grid", "confirm": "true"},
+    {"action": "island", "confirm": True},
+])
+@pytest.mark.asyncio
+async def test_islanding_needs_action_and_confirm(env, gm, caplog, payload):
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await run_commands(cmd("v1r", "islanding", payload))
+    assert gm.local_control.await_count == 0
+    assert "confirm:true" in caplog.text
+
+
+@pytest.mark.parametrize("gateway", ["cloud", "hybrid", "full"])
+@pytest.mark.asyncio
+async def test_islanding_only_on_v1r(env, gm, caplog, gateway):
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await run_commands(cmd(gateway, "islanding", {"action": "off_grid", "confirm": True}))
+    assert gm.local_control.await_count == 0 and gm.cloud_control.await_count == 0
+    assert "no confirmed v1r transport" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_islanding_rejected_while_mode_unknown(env, gm):
+    gateway_manager.cache["v1r"] = _status(gateway_manager.gateways["v1r"], None)
+    await run_commands(cmd("v1r", "islanding", {"action": "off_grid", "confirm": True}))
+    assert gm.local_control.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_islanding_dispatch(env, gm):
+    gm.local_control.return_value = {"result": 1}
+    await run_commands(cmd("v1r", "islanding", {"action": "off_grid", "confirm": True}))
+    await run_commands(cmd("v1r", "islanding", {"action": "on_grid", "confirm": True}))
+    assert calls(gm.local_control) == [
+        (("v1r", "go_off_grid"), {"timeout": 10.0, "confirm": True}),
+        (("v1r", "reconnect_grid"), {"timeout": 10.0}),
+    ]
+
+
+@pytest.mark.parametrize("result, applied", [
+    ({"result": 1}, True), ({"result": 0}, False), ({"result": True}, False),
+    ({"result": "1"}, False), ({"error": "x", "result": 1}, False), (None, False),
+])
+@pytest.mark.asyncio
+async def test_islanding_needs_hardware_ack(env, gm, caplog, result, applied):
+    gm.local_control.return_value = result
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        await run_commands(cmd("v1r", "islanding", {"action": "off_grid", "confirm": True}))
+    assert ("applied" in caplog.text) == applied
+    assert ("failed" in caplog.text) == (not applied)
+
+
+@pytest.mark.asyncio
+async def test_islanding_cooldown_does_not_stop_the_loop(env, gm, caplog):
+    gm.local_control.side_effect = [RuntimeError("rate limited"), {"ok": True}]
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await run_commands(
+            cmd("v1r", "islanding", {"action": "off_grid", "confirm": True}),
+        )
+        await run_commands(cmd("v1r", "reserve", {"value": 25}))
+    assert "rate limited" in caplog.text
+    assert gm.local_control.await_count == 2
+
+
+@pytest.mark.parametrize("result", [None, {"error": "Failed to write config"}, {"ERROR": "x"}])
+@pytest.mark.asyncio
+async def test_failed_writes_are_not_reported_as_applied(env, gm, caplog, result):
+    gm.local_control.return_value = result
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        await run_commands(cmd("cloud", "reserve", {"value": 30}))
+    assert "applied" not in caplog.text and "failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_audit_log_names_gateway_value_and_path(env, gm, caplog):
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        await run_commands(cmd("hybrid", "mode", {"value": "backup"}),
+                           cmd("fleet", "reserve", {"value": 40}))
+    assert "'mode' for 'hybrid' applied (value='backup' via hybrid cloud)" in caplog.text
+    assert "'reserve' for 'fleet' applied (value=40 via fleetapi)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_received_text_is_escaped_in_logs(env, gm, caplog):
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await run_commands(cmd("cloud", "mode", {"value": "x\nINFO forged line"}))
+    assert "\nINFO forged line" not in caplog.text
+    assert "'x\\nINFO forged line'" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unexpected_error_is_contained(env, gm, caplog):
+    gm.local_control.side_effect = [ValueError("boom"), {"ok": True}]
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await run_commands(cmd("cloud", "reserve", {"value": 10}),
+                           cmd("fleet", "reserve", {"value": 20}))
+    assert gm.local_control.await_count == 2
+    assert "boom" in caplog.text
+
+
+# --- Control loop: bursts, retained commands, message safety -------------------
+
+
+@pytest.mark.asyncio
+async def test_burst_collapses_to_latest_per_topic(env, gm):
+    await run_commands(*(cmd("cloud", "reserve", {"value": v}) for v in range(50)))
+    assert calls(gm.local_control) == [(("cloud", "set_reserve", 49), {"timeout": 10.0})]
+
+
+@pytest.mark.asyncio
+async def test_burst_keeps_the_order_of_latest_commands(env, gm):
+    await run_commands(cmd("cloud", "mode", {"value": "backup"}),
+                       cmd("cloud", "reserve", {"value": 30}),
+                       cmd("cloud", "mode", {"value": "autonomous"}))
+    assert [c[0][1:] for c in calls(gm.local_control)] == [
+        ("set_reserve", 30), ("set_mode", "autonomous")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retained_replay_is_not_executed(env, gm, caplog):
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        client = await run_commands(cmd("cloud", "reserve", {"value": 30}, retain=True))
+    assert gm.local_control.await_count == 0
+    assert "retained commands are not executed" in caplog.text
+    assert ("pypowerwall/cloud/control/reserve/set", b"", True) in client.published
+
+
+@pytest.mark.asyncio
+async def test_every_command_topic_is_cleared(env, gm):
+    """A command published retained while we're connected arrives with
+    retain=0, so after running it the retained copy must be deleted."""
+    client = await run_commands(cmd("cloud", "reserve", {"value": 30}))
+    assert gm.local_control.await_count == 1
+    assert client.published == [("pypowerwall/cloud/control/reserve/set", b"", True)]
+
+
+@pytest.mark.asyncio
+async def test_empty_payload_is_ignored_quietly(env, gm, caplog):
+    """The echo of a retained clear is an empty message: nothing to run,
+    nothing to warn about, no clear of its own."""
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        client = await run_commands(cmd("cloud", "reserve", b""))
+    assert gm.local_control.await_count == 0
+    assert caplog.text == ""
+    assert client.published == []
+
+
+@pytest.mark.asyncio
+async def test_no_message_lost_at_the_window_deadline(env, gm):
+    """Regression: wait_for() around __anext__() could drop a message that
+    arrived just as the coalesce window closed. Deliver the second command at
+    many offsets around the deadline; it must always run."""
+    pub = MqttPublisher()
+    loop = asyncio.get_running_loop()
+    for i in range(-50, 51):
+        client = FakeClient()
+        messages = client.messages.__aiter__()
+        client.deliver(*cmd("cloud", "reserve", {"value": 1}))
+        first = await messages.__anext__()
+        loop.call_at(
+            loop.time() + CONTROL_COALESCE_WINDOW_S + i * 40e-6,
+            client.deliver, *cmd("fleet", "reserve", {"value": 2}),
+        )
+        batch = await pub._collect_control_burst(messages, first)
+        await asyncio.sleep(0.005)
+        assert len(batch) + client._queue.qsize() == 2, f"lost at offset {i * 40} us"
+
+
+@pytest.mark.asyncio
+async def test_loop_end_forces_reconnect(env, gm, caplog):
+    pub = MqttPublisher()
+    pub._connected = True
+    client = FakeClient()
+    client._disconnected.set_exception(RuntimeError("broker gone"))
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await asyncio.wait_for(pub._control_message_loop(client), timeout=5)
+    assert pub._connected is False
+    assert "forcing reconnect" in caplog.text
+
+
+# --- Connection loop: startup logging and the control task --------------------
+
+
+def _fake_aiomqtt(monkeypatch, enter):
+    """Replace aiomqtt with a stub whose Client context runs `enter`."""
 
     class FakeCM:
-        def __init__(self, holder):
-            self._holder = holder
-
         async def __aenter__(self):
-            self._holder[0]._shutdown = True  # one pass, then stop
-            return AsyncMock()
+            return enter()
 
         async def __aexit__(self, *args):
             return False
 
-    holder = [pub]
-    fake_aiomqtt = types.ModuleType("aiomqtt")
-    fake_aiomqtt.Client = lambda **kwargs: FakeCM(holder)
-    fake_aiomqtt.Will = lambda **kwargs: object()
-    monkeypatch.setitem(sys.modules, "aiomqtt", fake_aiomqtt)
+    module = types.ModuleType("aiomqtt")
+    module.Client = lambda **kwargs: FakeCM()
+    module.Will = lambda **kwargs: object()
+    monkeypatch.setitem(sys.modules, "aiomqtt", module)
+    monkeypatch.setattr(MqttPublisher, "_safe_publish", AsyncMock())
 
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
+
+@pytest.mark.parametrize("missing", ["mqtt_username", "mqtt_password", "control_secret"])
+@pytest.mark.asyncio
+async def test_says_why_controls_are_off(env, monkeypatch, caplog, missing):
+    monkeypatch.setattr(settings, missing, None)
+    pub = MqttPublisher()
+
+    def enter():
+        pub._shutdown = True  # one pass
+        return AsyncMock()
+
+    _fake_aiomqtt(monkeypatch, enter)
+    env_name = {"mqtt_username": "MQTT_USERNAME", "mqtt_password": "MQTT_PASSWORD",
+                "control_secret": "PW_CONTROL_SECRET"}[missing]
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
         await asyncio.wait_for(pub._connection_loop(), timeout=5)
-        warnings = [r for r in caplog.records
-                    if "MQTT_USERNAME" in r.getMessage()]
-        assert len(warnings) == 1
-
-        # Second connect: no duplicate warning
-        caplog.clear()
         pub._shutdown = False
+        await asyncio.wait_for(pub._connection_loop(), timeout=5)  # reconnect
+    warnings = [r.getMessage() for r in caplog.records if "but disabled" in r.getMessage()]
+    assert len(warnings) == 1 and warnings[0].endswith(f"set {env_name}")
+
+
+@pytest.mark.asyncio
+async def test_startup_names_enabled_controls_and_warns_on_islanding(env, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "mqtt_topic_prefix", "home")
+    pub = MqttPublisher()
+
+    def enter():
+        pub._shutdown = True
+        return MagicMock(subscribe=AsyncMock(), messages=MagicMock())
+
+    _fake_aiomqtt(monkeypatch, enter)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
         await asyncio.wait_for(pub._connection_loop(), timeout=5)
-        assert [r for r in caplog.records
-                if "MQTT_USERNAME" in r.getMessage()] == []
+    assert "enabled: reserve, mode, grid_charging, grid_export, islanding" in caplog.text
+    assert "ACL home/+/control/#" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_cloud_gateway_uses_own_connection(monkeypatch):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "mqtt_topic_prefix", "pypowerwall")
-
-    # Hybrid cloud present, but a cloud_mode gateway must be driven on its
-    # own connection (shared cloud_control cannot target a gateway)
-    mock_local, mock_cloud, _ = await _run_control_messages(
-        monkeypatch, "remote",
-        {"cloud_mode": True, "email": "user@example.com"},
-        [("pypowerwall/remote/control/reserve/set", json.dumps({"value": 20}))],
-        cloud_result={"ok": True},
-    )
-    mock_local.assert_called_once()
-    assert mock_local.call_args[0][0] == "remote"
-    assert mock_local.call_args[0][1] == "set_reserve"
-    mock_cloud.assert_not_called()
-
-    # TEDAPI gateway with hybrid cloud bound to ANOTHER gateway: the shared
-    # cloud must not be used (wrong site) — own local connection instead
-    mock_local, mock_cloud, _ = await _run_control_messages(
-        monkeypatch, "home", {"host": "1.1.1.1"},
-        [("pypowerwall/home/control/mode/set", json.dumps({"value": "backup"}))],
-        cloud_result={"ok": True}, hybrid=True, bound_id="other",
-    )
-    mock_local.assert_called_once()
-    assert mock_local.call_args[0][0] == "home"
-    mock_cloud.assert_not_called()
-
-    # TEDAPI gateway with hybrid cloud bound to ITSELF: shared cloud path
-    mock_local, mock_cloud, _ = await _run_control_messages(
-        monkeypatch, "home", {"host": "1.1.1.1"},
-        [("pypowerwall/home/control/mode/set", json.dumps({"value": "backup"}))],
-        cloud_result={"ok": True}, hybrid=True, bound_id="home",
-    )
-    mock_cloud.assert_called_once()
-    mock_local.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_no_retry_on_other_path(monkeypatch):
-    """A None result (incl. timeout) never retries on the other path."""
-    # Bound hybrid: cloud returns None -> local must NOT be tried
-    mock_local, mock_cloud, _ = await _run_control_messages(
-        monkeypatch, "home", {"host": "1.1.1.1"},
-        [("pypowerwall/home/control/reserve/set", json.dumps({"value": 20}))],
-        cloud_result=None, hybrid=True, bound_id="home",
-    )
-    mock_cloud.assert_called_once()
-    mock_local.assert_not_called()
-
-    # Unbound local: local returns None -> cloud must NOT be tried
-    mock_local, mock_cloud, _ = await _run_control_messages(
-        monkeypatch, "home", {"host": "1.1.1.1"},
-        [("pypowerwall/home/control/reserve/set", json.dumps({"value": 20}))],
-        cloud_result={"ok": True}, hybrid=True, bound_id="other",
-        local_result=None,
-    )
-    mock_local.assert_called_once()
-    mock_cloud.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_mode_invalid_rejected_with_warning(monkeypatch, caplog):
-    """Invalid mode values reject with WARNING (latest-wins safe: solo batch)."""
-    import logging
-
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-        mock_local, _, _ = await _run_control_messages(
-            monkeypatch, "home", {"host": "1.1.1.1"},
-            [("pypowerwall/home/control/mode/set",
-              json.dumps({"value": "turbo"}))],
-        )
-    mock_local.assert_not_called()
-    assert any("invalid value" in r.getMessage() for r in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_bit_gate_rejects_disabled_control(monkeypatch, caplog):
-    """A control whose MQTT_CONTROLS bit is off is rejected with WARNING."""
-    import logging
-
-    # Only reserve enabled: mode + islanding must be rejected
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-        mock_local, _, _ = await _run_control_messages(
-            monkeypatch, "home", {"host": "1.1.1.1"},
-            [("pypowerwall/home/control/mode/set",
-              json.dumps({"value": "backup"}))],
-            mask=1,
-        )
-    mock_local.assert_not_called()
-    assert any("bit not set" in r.getMessage() for r in caplog.records)
-
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "v1r", {"host": "1.1.1.1", "rsa_key_configured": True},
-        [("pypowerwall/v1r/control/islanding/set",
-          json.dumps({"action": "off_grid", "confirm": True}))],
-        mask=15,  # everything but islanding
-    )
-    mock_local.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_retained_command_warned_and_cleared(monkeypatch, caplog):
-    """Retained replays never execute: WARNING + retained slot cleared."""
-    import logging
-
-    mock_local, _, client = await _run_control_messages(
-        monkeypatch, "home", {"host": "1.1.1.1"},
-        [],
-    )
-    from app.mqtt.publisher import MqttPublisher
-
+async def test_dead_control_task_triggers_reconnect(env, monkeypatch, caplog):
     pub = MqttPublisher()
-    client2 = _Client()
-    task = asyncio.create_task(pub._control_message_loop(client2))
-    await asyncio.sleep(0.05)
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-        await client2.put(_Msg("pypowerwall/home/control/reserve/set",
-                               json.dumps({"value": 50}), retain=True))
-        await asyncio.sleep(0.3)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    finally:
-        from app.core.gateway_manager import gateway_manager
-        if "home" in gateway_manager.gateways:
-            del gateway_manager.gateways["home"]
-    mock_local.assert_not_called()
-    assert any("retained" in r.getMessage().lower() for r in caplog.records)
-    # Retained slot cleared (empty retained publish on the same topic)
-    cleared = [
-        c for c in client2.publish.call_args_list
-        if c.args[0] == "pypowerwall/home/control/reserve/set"
-        and c.args[1] == ""
-    ]
-    assert cleared, "retained command was not cleared from the broker"
-
-
-@pytest.mark.asyncio
-async def test_value_allowlists_reject(monkeypatch):
-    """Invalid mode/grid_export values and missing confirm never dispatch."""
-    bad = [
-        ("pypowerwall/home/control/mode/set", json.dumps({"value": "turbo"})),
-        ("pypowerwall/home/control/grid_export/set", json.dumps({"value": True})),
-        ("pypowerwall/home/control/grid_export/set", json.dumps({"value": "all"})),
-        ("pypowerwall/home/control/reserve/set", json.dumps({"value": 101})),
-        ("pypowerwall/home/control/reserve/set", json.dumps({})),
-        ("pypowerwall/home/control/grid_charging/set", json.dumps({"value": 1})),
-        ("pypowerwall/home/control/mode/set", "not json"),
-        ("pypowerwall/home/control/mode/set", json.dumps([1, 2])),
-    ]
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "home", {"host": "1.1.1.1"}, bad,
-    )
-    mock_local.assert_not_called()
-
-    # Islanding without literal confirm:true is rejected
-    from app.core.gateway_manager import gateway_manager
-    from app.models.gateway import GatewayStatus as _GS
-    from app.models.gateway import PowerwallData as _PD
-
-    status = _GS(
-        gateway=Gateway(id="v", name="V", host="1.1.1.1",
-                        rsa_key_configured=True, online=True),
-        data=_PD(tedapi_mode="v1r"), online=True, last_updated=1.0,
-    )
-    monkeypatch.setattr(gateway_manager, "get_gateway", lambda gid: status)
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "v", {"host": "1.1.1.1", "rsa_key_configured": True},
-        [("pypowerwall/v/control/islanding/set",
-          json.dumps({"action": "off_grid", "confirm": False}))],
-    )
-    mock_local.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_unknown_gateway_and_control_warn(monkeypatch, caplog):
-    """Unknown gateways/controls log WARNING and dispatch nothing."""
-    import logging
-
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-        mock_local, _, _ = await _run_control_messages(
-            monkeypatch, "home", {"host": "1.1.1.1"},
-            [
-                ("pypowerwall/nope/control/reserve/set", json.dumps({"value": 20})),
-                ("pypowerwall/home/control/selfdestruct/set", json.dumps({})),
-                ("pypowerwall/home/control/reserve", json.dumps({"value": 20})),
-            ],
-        )
-    mock_local.assert_not_called()
-    messages = [r.getMessage() for r in caplog.records]
-    assert any("unknown gateway" in m for m in messages)
-    assert any("unknown control" in m for m in messages)
-
-
-@pytest.mark.asyncio
-async def test_error_dict_treated_as_failure(monkeypatch, caplog):
-    """{'error': ...} stub responses are failures, never 'applied'."""
-    import logging
-
-    with caplog.at_level(logging.INFO, logger="app.mqtt.publisher"):
-        mock_local, _, _ = await _run_control_messages(
-            monkeypatch, "home", {"host": "1.1.1.1"},
-            [("pypowerwall/home/control/reserve/set", json.dumps({"value": 20}))],
-            local_result={"error": "stub"},
-        )
-    mock_local.assert_called_once()
-    messages = [r.getMessage() for r in caplog.records]
-    assert not any("applied" in m for m in messages)
-    assert any("failed" in m for m in messages)
-
-
-@pytest.mark.asyncio
-async def test_islanding_ack_checked(monkeypatch, caplog):
-    """Only {"result": 1} counts; anything else is a failure, same as HTTP."""
-    import logging
-    from app.core.gateway_manager import gateway_manager
-    from app.models.gateway import GatewayStatus as _GS
-    from app.models.gateway import PowerwallData as _PD
-
-    status = _GS(
-        gateway=Gateway(id="v", name="V", host="1.1.1.1",
-                        rsa_key_configured=True, online=True),
-        data=_PD(tedapi_mode="v1r"), online=True, last_updated=1.0,
-    )
-    monkeypatch.setattr(gateway_manager, "get_gateway", lambda gid: status)
-
-    async def run_islanding(result):
-        with caplog.at_level(logging.INFO, logger="app.mqtt.publisher"):
-            caplog.clear()
-            mock_local, _, _ = await _run_control_messages(
-                monkeypatch, "v",
-                {"host": "1.1.1.1", "rsa_key_configured": True},
-                [("pypowerwall/v/control/islanding/set",
-                  json.dumps({"action": "off_grid", "confirm": True}))],
-                local_result=result,
-            )
-            return mock_local, [r.getMessage() for r in caplog.records]
-
-    mock_local, messages = await run_islanding({"result": 1})
-    mock_local.assert_called_once()
-    # Same 10 s timeout as HTTP POST /control/islanding
-    assert mock_local.call_args[1].get("timeout") == 10.0
-    assert any("applied" in m for m in messages)
-
-    for bad in ({"result": 0}, {}, {"result": True}, None, {"error": "x"}):
-        mock_local, messages = await run_islanding(bad)
-        assert not any("applied" in m for m in messages), bad
-        assert any(
-            "not acknowledged" in m or "failed" in m for m in messages
-        ), bad
-
-
-@pytest.mark.asyncio
-async def test_oversized_payload_rejected(monkeypatch):
-    """Payloads over the 1 KB cap never reach validation or dispatch."""
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "home", {"host": "1.1.1.1"},
-        [("pypowerwall/home/control/reserve/set",
-          json.dumps({"value": 20, "pad": "x" * 2048}))],
-    )
-    mock_local.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_burst_coalesces_to_latest(monkeypatch):
-    """50 rapid reserve commands become one write with the last value."""
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "home", {"host": "1.1.1.1"},
-        [
-            (
-                "pypowerwall/home/control/reserve/set",
-                json.dumps({"value": i % 101}),
-            )
-            for i in range(50)
-        ],
-    )
-    assert mock_local.call_count == 1
-    assert mock_local.call_args[0][2] == 49
-
-
-@pytest.mark.asyncio
-async def test_grid_controls_need_capability(monkeypatch):
-    """Grid setters on an incapable gateway (plain local) are rejected."""
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "plain", {"host": "1.1.1.1"},
-        [("pypowerwall/plain/control/grid_charging/set",
-          json.dumps({"value": True}))],
-    )
-    mock_local.assert_not_called()
-
-    # Same gateway with a bound hybrid cloud: executable
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "plain", {"host": "1.1.1.1"},
-        [("pypowerwall/plain/control/grid_charging/set",
-          json.dumps({"value": True}))],
-        cloud_result={"ok": True}, hybrid=True, bound_id="plain",
-    )
-    mock_local.assert_not_called()  # routed via bound cloud instead
-    # (cloud mock asserted separately in routing tests)
-
-
-@pytest.mark.asyncio
-async def test_discovery_removes_disabled_controls(monkeypatch):
-    """Turning a bit off removes the entity via empty retained config."""
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "mqtt_host", "localhost")
-    monkeypatch.setattr(settings, "mqtt_controls", 31)
-    monkeypatch.setattr(settings, "control_secret", "secret")
-    monkeypatch.setattr(settings, "mqtt_username", "user")
-    monkeypatch.setattr(settings, "mqtt_password", "pass")
-    monkeypatch.setattr(settings, "mqtt_ha_discovery", True)
-    monkeypatch.setattr(settings, "mqtt_topic_prefix", "pypowerwall")
-    monkeypatch.setattr(settings, "mqtt_ha_prefix", "homeassistant")
-    monkeypatch.setattr(settings, "mqtt_qos", 1)
-    monkeypatch.setattr(settings, "mqtt_retain", True)
-
-    from app.core.gateway_manager import gateway_manager
-
-    gw = Gateway(id="gw", name="GW", host="1.1.1.1", online=True)
-    gateway_manager.gateways["gw"] = gw
-    try:
-        pub = MqttPublisher()
-        pub._client = AsyncMock()
-        pub._connected = True
-        sent = []
-
-        async def fake_safe(self, topic, payload, retain, qos):
-            sent.append((topic, payload, retain))
-
-        monkeypatch.setattr(MqttPublisher, "_safe_publish", fake_safe)
-        status = GatewayStatus(
-            gateway=gw, data=PowerwallData(), online=True, last_updated=1.0,
-        )
-        await pub._publish_ha_discovery("gw", status)
-        announced = {t for t, p, r in sent if "reserve_control" in t}
-        assert announced, "reserve control was not announced"
-
-        # Disable everything: stale control configs must be cleared
-        monkeypatch.setattr(settings, "mqtt_controls", 0)
-        sent.clear()
-        await pub._publish_ha_discovery("gw", status)
-        cleared = {
-            t for t, p, r in sent
-            if p == "" and r is True and "reserve_control" in t
-        }
-        assert cleared, "disabled control entity was not removed"
-    finally:
-        del gateway_manager.gateways["gw"]
-
-
-@pytest.mark.asyncio
-async def test_mask_to_zero_refires_through_publish_gateway(monkeypatch):
-    """Mask 31 -> 0 through publish_gateway removes entities (no silent keep).
-
-    The discovery signature union only grows, so without explicit
-    controls-state tracking a shrink to 0 would never re-fire discovery
-    and stale entities would stay in HA forever.
-    """
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "mqtt_host", "localhost")
-    monkeypatch.setattr(settings, "mqtt_controls", 31)
-    monkeypatch.setattr(settings, "control_secret", "secret")
-    monkeypatch.setattr(settings, "mqtt_username", "user")
-    monkeypatch.setattr(settings, "mqtt_password", "pass")
-    monkeypatch.setattr(settings, "mqtt_ha_discovery", True)
-    monkeypatch.setattr(settings, "mqtt_topic_prefix", "pypowerwall")
-    monkeypatch.setattr(settings, "mqtt_ha_prefix", "homeassistant")
-    monkeypatch.setattr(settings, "mqtt_qos", 1)
-    monkeypatch.setattr(settings, "mqtt_retain", True)
-
-    from app.core.gateway_manager import gateway_manager
-
-    gw = Gateway(id="gw", name="GW", host="1.1.1.1",
-                 rsa_key_configured=True, online=True)
-    gateway_manager.gateways["gw"] = gw
-    try:
-        pub = MqttPublisher()
-        pub._client = AsyncMock()
-        pub._connected = True
-        sent = []
-
-        async def fake_safe(self, topic, payload, retain, qos):
-            sent.append((topic, payload, retain))
-
-        monkeypatch.setattr(MqttPublisher, "_safe_publish", fake_safe)
-        status = GatewayStatus(
-            gateway=gw, data=PowerwallData(tedapi_mode="v1r"),
-            online=True, last_updated=1.0,
-        )
-        await pub.publish_gateway("gw", status)
-        announced = {t for t, p, r in sent if "reserve_control" in t}
-        assert announced, "reserve control was not announced"
-
-        # Shrink the mask to 0 through the real publish path: the stale
-        # control entity must be cleared, not silently kept
-        monkeypatch.setattr(settings, "mqtt_controls", 0)
-        sent.clear()
-        await pub.publish_gateway("gw", status)
-        cleared = {
-            t for t, p, r in sent
-            if p == "" and r is True and "reserve_control" in t
-        }
-        assert cleared, "mask shrink to 0 did not remove the entity"
-    finally:
-        del gateway_manager.gateways["gw"]
-
-
-@pytest.mark.asyncio
-async def test_grid_export_valid_paths(monkeypatch):
-    """Valid grid_export: incapable rejects, v1r-capable routes."""
-    from app.core.gateway_manager import gateway_manager
-    from app.models.gateway import GatewayStatus as _GS
-    from app.models.gateway import PowerwallData as _PD
-
-    # Incapable plain local gateway: rejected despite valid value
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "plain", {"host": "1.1.1.1"},
-        [("pypowerwall/plain/control/grid_export/set",
-          json.dumps({"value": "pv_only"}))],
-    )
-    mock_local.assert_not_called()
-
-    # v1r-confirmed gateway: routed on its own connection
-    status = _GS(
-        gateway=Gateway(id="v", name="V", host="1.1.1.1",
-                        rsa_key_configured=True, online=True),
-        data=_PD(tedapi_mode="v1r"), online=True, last_updated=1.0,
-    )
-    monkeypatch.setattr(gateway_manager, "get_gateway", lambda gid: status)
-    mock_local, mock_cloud, _ = await _run_control_messages(
-        monkeypatch, "v", {"host": "1.1.1.1", "rsa_key_configured": True},
-        [("pypowerwall/v/control/grid_export/set",
-          json.dumps({"value": "never"}))],
-    )
-    mock_local.assert_called_once()
-    assert mock_local.call_args[0][1] == "set_grid_export"
-    mock_cloud.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_islanding_dispatch_error_no_crash(monkeypatch, caplog):
-    """Cooldown/in-progress exceptions become WARNING, never a loop death."""
-    import logging
-    from app.core.gateway_manager import gateway_manager
-    from app.models.gateway import GatewayStatus as _GS
-    from app.models.gateway import PowerwallData as _PD
-
-    status = _GS(
-        gateway=Gateway(id="v", name="V", host="1.1.1.1",
-                        rsa_key_configured=True, online=True),
-        data=_PD(tedapi_mode="v1r"), online=True, last_updated=1.0,
-    )
-    monkeypatch.setattr(gateway_manager, "get_gateway", lambda gid: status)
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-        mock_local, _, _ = await _run_control_messages(
-            monkeypatch, "v",
-            {"host": "1.1.1.1", "rsa_key_configured": True},
-            [("pypowerwall/v/control/islanding/set",
-              json.dumps({"action": "off_grid", "confirm": True}))],
-            local_effect=Exception("cooldown 30s"),
-        )
-    mock_local.assert_called_once()
-    assert any("failed" in r.getMessage() for r in caplog.records)
-
-
-def test_capability_and_route_helpers():
-    """Direct unit coverage for capability/routing/error helpers."""
-    from app.mqtt.publisher import (
-        _control_config_topics,
-        _gateway_is_v1r,
-        _grid_controls_capable,
-    )
-
-    assert _grid_controls_capable(object(), None) is False
-    # Malformed discovery payloads are skipped, not crashed on
-    assert _control_config_topics([("t", "not json")]) == set()
-    # Unknown manager surfaces fail closed
-    assert _gateway_is_v1r(None, "x") is False
-
-
-@pytest.mark.asyncio
-async def test_control_loop_death_forces_reconnect(monkeypatch, caplog):
-    """An ended message stream warns and marks the connection for reconnect."""
-    import logging
-
-    from app.mqtt.publisher import MqttPublisher
-
-    pub = MqttPublisher()
-    pub._connected = True
-
-    class DeadClient:
-        @property
-        def messages(self):
-            return self
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            raise StopAsyncIteration
-
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-        await pub._control_message_loop(DeadClient())
-    assert pub._connected is False
-    assert any("forcing reconnect" in r.getMessage() for r in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_route_unknown_gateway():
-    """Routing an unknown gateway returns (None, 'none') without dispatch."""
-    from app.mqtt.publisher import _route_gateway_control
-
-    result, path = await _route_gateway_control(
-        "no-such-gw-xyz", "set_reserve", 20
-    )
-    assert (result, path) == (None, "none")
-
-
-@pytest.mark.asyncio
-async def test_retained_clear_variants(monkeypatch, caplog):
-    """Retained clearing tolerates exotic clients (no publish / raising)."""
-    import logging
-
-    from app.mqtt.publisher import MqttPublisher
-
-    pub = MqttPublisher()
-
-    class NoPublish:
-        pass
-
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-        await pub._warn_retained_command(NoPublish(), "t/x")
-    assert any("retained" in r.getMessage().lower() for r in caplog.records)
-
-    class RaisingPublish:
-        async def publish(self, *args, **kwargs):
-            raise RuntimeError("broker gone")
-
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-        await pub._warn_retained_command(RaisingPublish(), "t/x")
-    # Best-effort: warning stands, no exception escapes
-
-
-@pytest.mark.asyncio
-async def test_coalesce_decode_failure(monkeypatch, caplog):
-    """Undecodable messages are dropped with WARNING, loop survives."""
-    import logging
-    from unittest.mock import MagicMock
-
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "home", {"host": "1.1.1.1"}, [],
-    )
-    from app.core.gateway_manager import gateway_manager
-    from app.mqtt.publisher import MqttPublisher
-
-    # Helper cleaned up: re-register for the manual loop part below
-    gateway_manager.gateways["home"] = Gateway(
-        id="home", name="home", host="1.1.1.1", online=True,
-    )
-    pub = MqttPublisher()
-    client = _Client()
-    task = asyncio.create_task(pub._control_message_loop(client))
-    await asyncio.sleep(0.05)
-
-    class BadTopic:
-        payload = b'{"value": 50}'
-        retain = False
-
-        @property
-        def topic(self):
-            raise RuntimeError("no topic")
-
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-        await client.put(BadTopic())
-        await client.put(_Msg("pypowerwall/home/control/reserve/set",
-                              json.dumps({"value": 60})))
-        await asyncio.sleep(0.3)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    finally:
-        if "home" in gateway_manager.gateways:
-            del gateway_manager.gateways["home"]
-    assert any("decode failed" in r.getMessage() for r in caplog.records)
-    # The valid sibling still executed (loop survived the bad message)
-    assert mock_local.call_count == 1
-    assert mock_local.call_args[0][2] == 60
-
-
-@pytest.mark.asyncio
-async def test_evil_retain_flag_treated_as_not_retained(monkeypatch):
-    """A retain flag that raises is treated as not-retained (fail-open read)."""
-    from unittest.mock import MagicMock
-
-    class EvilRetain:
-        def __init__(self, topic, payload):
-            self.topic = MagicMock()
-            self.topic.value = topic
-            self.payload = payload.encode()
-
-        @property
-        def retain(self):
-            raise RuntimeError("boom")
-
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "home", {"host": "1.1.1.1"}, [],
-    )
-    from app.core.gateway_manager import gateway_manager
-    from app.mqtt.publisher import MqttPublisher
-
-    gateway_manager.gateways["home"] = Gateway(
-        id="home", name="home", host="1.1.1.1", online=True,
-    )
-    pub = MqttPublisher()
-    client = _Client()
-    task = asyncio.create_task(pub._control_message_loop(client))
-    await asyncio.sleep(0.05)
-    await client.put(EvilRetain("pypowerwall/home/control/reserve/set",
-                                json.dumps({"value": 42})))
-    await asyncio.sleep(0.3)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    finally:
-        if "home" in gateway_manager.gateways:
-            del gateway_manager.gateways["home"]
-    mock_local.assert_called_once()
-    assert mock_local.call_args[0][2] == 42
-
-
-@pytest.mark.asyncio
-async def test_control_loop_broken_stream_reconnects(monkeypatch, caplog):
-    """An unreadable message stream warns and forces reconnect."""
-    import logging
-
-    from app.mqtt.publisher import MqttPublisher
-
-    pub = MqttPublisher()
-    pub._connected = True
-
-    class BrokenStream:
-        @property
-        def messages(self):
-            raise RuntimeError("stream gone")
-
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-        await pub._control_message_loop(BrokenStream())
-    assert pub._connected is False
-    assert any("loop error" in r.getMessage() for r in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_startup_logs_enabled_controls(monkeypatch, caplog):
-    """Subscribe logs enabled names + dedicated islanding warning."""
-    import logging
-    import sys
-    import types
-
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "mqtt_host", "localhost")
-    monkeypatch.setattr(settings, "mqtt_username", "user")
-    monkeypatch.setattr(settings, "mqtt_password", "pass")
-    monkeypatch.setattr(settings, "mqtt_controls", 31)
-    monkeypatch.setattr(settings, "control_secret", "secret")
-
-    pub = MqttPublisher()
-    pub._client = AsyncMock()
-    pub._connected = True
-
-    async def fake_safe(self, topic, payload, retain, qos):
-        return None
-
-    monkeypatch.setattr(MqttPublisher, "_safe_publish", fake_safe)
-
-    class FakeCM:
-        def __init__(self, holder=None):
-            self._holder = holder
-
-        async def __aenter__(self):
-            pub._shutdown = True  # one pass: subscribe block runs, then stop
-            return _Client()
-
-        async def __aexit__(self, *args):
-            return False
-
-    fake_aiomqtt = types.ModuleType("aiomqtt")
-    fake_aiomqtt.Client = lambda **kwargs: FakeCM()
-    fake_aiomqtt.Will = lambda **kwargs: object()
-    monkeypatch.setitem(sys.modules, "aiomqtt", fake_aiomqtt)
-
-    with caplog.at_level(logging.INFO, logger="app.mqtt.publisher"):
-        await asyncio.wait_for(pub._connection_loop(), timeout=10)
-    messages = [r.getMessage() for r in caplog.records]
-    subscribed = [m for m in messages if "MQTT controls subscribed" in m]
-    assert subscribed, messages
-    assert "islanding" in subscribed[0]
-    assert any("ISLANDING" in m for m in messages)
-
-
-@pytest.mark.asyncio
-async def test_dead_control_task_triggers_reconnect(monkeypatch, caplog):
-    """Heartbeat notices a silently dead control task and reconnects."""
-    import logging
-    import sys
-    import types
-
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "mqtt_host", "localhost")
-    monkeypatch.setattr(settings, "mqtt_username", "user")
-    monkeypatch.setattr(settings, "mqtt_password", "pass")
-    monkeypatch.setattr(settings, "mqtt_controls", 31)
-    monkeypatch.setattr(settings, "control_secret", "secret")
-
-    pub = MqttPublisher()
-    pub._client = AsyncMock()
-    pub._connected = True
     connects = []
 
-    async def fake_safe(self, topic, payload, retain, qos):
-        return None
+    def enter():
+        connects.append(1)
+        if len(connects) > 1:
+            pub._shutdown = True  # stop after the reconnect
+        return FakeClient()
 
-    monkeypatch.setattr(MqttPublisher, "_safe_publish", fake_safe)
+    _fake_aiomqtt(monkeypatch, enter)
 
-    class FakeCM:
-        async def __aenter__(self):
-            connects.append(1)
-            if len(connects) > 1:
-                pub._shutdown = True  # stop after the reconnect
-            return _ClientBlocking()
-
-        async def __aexit__(self, *args):
-            return False
-
-    class _ClientBlocking(_Client):
-        pass  # queue stays empty: control task pends until killed below
-
-    fake_aiomqtt = types.ModuleType("aiomqtt")
-    fake_aiomqtt.Client = lambda **kwargs: FakeCM()
-    fake_aiomqtt.Will = lambda **kwargs: object()
-    monkeypatch.setitem(sys.modules, "aiomqtt", fake_aiomqtt)
-
-    async def killer():
-        # Wait for the handler task, then kill it silently from outside
+    async def kill_control_task():
         for _ in range(100):
             await asyncio.sleep(0.05)
-            targets = [
-                t for t in asyncio.all_tasks()
-                if t.get_name() == "mqtt-control-handler"
-            ]
-            if targets:
-                targets[0].cancel()
-                return
-        raise AssertionError("control handler task never appeared")
+            for task in asyncio.all_tasks():
+                if task.get_name() == "mqtt-control-handler":
+                    task.cancel()
+                    return
+        raise AssertionError("control task never started")
 
     loop_task = asyncio.create_task(pub._connection_loop())
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-        await asyncio.wait_for(killer(), timeout=10)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await asyncio.wait_for(kill_control_task(), timeout=10)
         await asyncio.wait_for(loop_task, timeout=30)
-    messages = [r.getMessage() for r in caplog.records]
-    assert any("ended unexpectedly" in m for m in messages), messages
-    assert len(connects) >= 2, "no reconnect after handler death"
-    pub._shutdown = True
+    assert "ended unexpectedly" in caplog.text
+    assert len(connects) >= 2
+
+
+# --- Shared cloud connection: bound only to an unambiguous site ----------------
+
+
+class _CloudClient:
+    def __init__(self, sites, sitefile=None):
+        self._sites, self.sitefile = sites, sitefile
+
+    def getsites(self):
+        return self._sites
 
 
 @pytest.mark.asyncio
-async def test_subscribe_failure_warns(monkeypatch, caplog):
-    """A failing control-topic subscribe warns instead of crashing."""
-    import logging
-    import sys
-    import types
-
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "mqtt_host", "localhost")
-    monkeypatch.setattr(settings, "mqtt_username", "user")
-    monkeypatch.setattr(settings, "mqtt_password", "pass")
-    monkeypatch.setattr(settings, "mqtt_controls", 31)
-    monkeypatch.setattr(settings, "control_secret", "secret")
-
-    pub = MqttPublisher()
-    pub._client = AsyncMock()
-    pub._connected = True
-
-    async def fake_safe(self, topic, payload, retain, qos):
-        return None
-
-    monkeypatch.setattr(MqttPublisher, "_safe_publish", fake_safe)
-
-    class RefusingClient(_Client):
-        async def subscribe(self, topic, qos=1):
-            raise RuntimeError("sub refused")
-
-    class FakeCM:
-        async def __aenter__(self):
-            pub._shutdown = True
-            return RefusingClient()
-
-        async def __aexit__(self, *args):
-            return False
-
-    fake_aiomqtt = types.ModuleType("aiomqtt")
-    fake_aiomqtt.Client = lambda **kwargs: FakeCM()
-    fake_aiomqtt.Will = lambda **kwargs: object()
-    monkeypatch.setitem(sys.modules, "aiomqtt", fake_aiomqtt)
-
-    with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-        await asyncio.wait_for(pub._connection_loop(), timeout=10)
-    assert any("subscribe failed" in r.getMessage() for r in caplog.records)
+async def test_no_site_check_without_mqtt_controls(env, monkeypatch, caplog):
+    """The binding is only for MQTT controls: with them off, no cloud call
+    and no warning, even on an ambiguous multi-site account."""
+    monkeypatch.setattr(settings, "mqtt_controls", 0)
+    monkeypatch.setattr(settings, "siteid", None)
+    client = MagicMock(sitefile=None)
+    monkeypatch.setattr(gateway_manager, "_cloud_control", MagicMock(client=client))
+    with caplog.at_level(logging.WARNING, logger="app.core.gateway_manager"):
+        assert await gateway_manager._cloud_site_unambiguous(False) is False
+    client.getsites.assert_not_called()
+    assert caplog.text == ""
 
 
+@pytest.mark.parametrize("siteid, fleetapi, sitefile, sites, bound", [
+    ("123", False, False, [1, 2], True),   # PW_SITEID picks the site
+    (None, True, False, [1, 2], True),     # FleetAPI: site from its own setup
+    (None, False, True, [1, 2], True),     # site chosen with pypowerwall setup
+    (None, False, False, [1], True),       # single-site account
+    (None, False, False, [1, 2], False),   # ambiguous: would default to sites[0]
+    (None, False, False, None, False),     # unknown
+])
 @pytest.mark.asyncio
-async def test_handler_unexpected_error_contained(monkeypatch, caplog):
-    """An unexpected lookup failure is contained with WARNING, loop lives on."""
-    import logging
+async def test_shared_cloud_binds_only_to_an_unambiguous_site(
+    env, monkeypatch, tmp_path, caplog, siteid, fleetapi, sitefile, sites, bound
+):
+    from app.config import GatewayConfig
+    gm_module = sys.modules["app.core.gateway_manager"]
 
-    from app.core.gateway_manager import gateway_manager
+    path = tmp_path / ".pypowerwall.site"
+    if sitefile:
+        path.write_text("2")
+    created = {}
 
-    mock_local, _, _ = await _run_control_messages(
-        monkeypatch, "home", {"host": "1.1.1.1"}, [],
-    )
-    real_gateways = gateway_manager.gateways
-    real_gateways["home"] = Gateway(
-        id="home", name="home", host="1.1.1.1", online=True,
-    )
+    def fake_powerwall(**kwargs):
+        created.update(kwargs)
+        return types.SimpleNamespace(client=_CloudClient(sites, str(path)))
 
-    class BoomDict(dict):
-        def get(self, *args, **kwargs):
-            raise RuntimeError("store gone")
-
-    monkeypatch.setattr(gateway_manager, "gateways", BoomDict())
-    from app.mqtt.publisher import MqttPublisher
-
-    pub = MqttPublisher()
-    client = _Client()
-    task = asyncio.create_task(pub._control_message_loop(client))
-    await asyncio.sleep(0.05)
-    try:
-        with caplog.at_level(logging.WARNING, logger="app.mqtt.publisher"):
-            await client.put(_Msg("pypowerwall/home/control/reserve/set",
-                                  json.dumps({"value": 50})))
-            await client.put(_Msg("pypowerwall/home/control/reserve/set",
-                                  json.dumps({"value": 60})))
-            await asyncio.sleep(0.3)
-        assert any("handler error" in r.getMessage() for r in caplog.records)
-        assert task.done() is False, "loop died on unexpected error"
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        mock_local.assert_not_called()
-    finally:
-        real_gateways.pop("home", None)
-
-
-@pytest.mark.asyncio
-async def test_grid_bound_cloud_dispatched(monkeypatch):
-    """Bound hybrid cloud actually receives the grid write (capability True)."""
-    mock_local, mock_cloud, _ = await _run_control_messages(
-        monkeypatch, "plain", {"host": "1.1.1.1"},
-        [("pypowerwall/plain/control/grid_charging/set",
-          json.dumps({"value": True}))],
-        cloud_result={"ok": True}, hybrid=True, bound_id="plain",
-    )
-    mock_local.assert_not_called()
-    mock_cloud.assert_called_once()
-    assert mock_cloud.call_args[0][0] == "set_grid_charging"
-
-
-@pytest.mark.asyncio
-async def test_grid_cloud_gateway_own_connection(monkeypatch):
-    """Cloud-mode gateway runs grid writes on its own connection."""
-    mock_local, mock_cloud, _ = await _run_control_messages(
-        monkeypatch, "remote",
-        {"cloud_mode": True, "email": "user@example.com"},
-        [("pypowerwall/remote/control/grid_export/set",
-          json.dumps({"value": "pv_only"}))],
-        cloud_result={"ok": True},
-    )
-    mock_local.assert_called_once()
-    assert mock_local.call_args[0][0] == "remote"
-    assert mock_local.call_args[0][1] == "set_grid_export"
-    mock_cloud.assert_not_called()
+    monkeypatch.setattr(gm_module.pypowerwall, "Powerwall", fake_powerwall)
+    monkeypatch.setattr(settings, "siteid", siteid)
+    monkeypatch.setattr(gateway_manager, "_cloud_control", None)
+    monkeypatch.setattr(gateway_manager, "_cloud_control_gateway_id", None)
+    config = GatewayConfig(id="home", host="10.0.0.2", email="a@b.c", fleetapi=fleetapi)
+    with caplog.at_level(logging.WARNING, logger="app.core.gateway_manager"):
+        await gateway_manager._init_cloud_control([config])
+    assert gateway_manager._cloud_control_gateway_id == ("home" if bound else None)
+    assert ("PW_SITEID" in caplog.text) == (not bound)
+    # PW_SITEID reaches the cloud client as the integer it compares with
+    assert created.get("siteid") == (123 if siteid else None)

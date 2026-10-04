@@ -581,8 +581,11 @@ class TestPublisherHaDiscovery:
         status = make_status()
         await pub.publish_gateway("test-gw", status)
 
-        topics = [c.args[0] for c in mock_client.publish.call_args_list]
-        disc_topics = [t for t in topics if "homeassistant" in t]
+        disc_topics = [
+            c.args[0]
+            for c in mock_client.publish.call_args_list
+            if "homeassistant" in c.args[0] and c.args[1]  # announced, not cleared
+        ]
         assert len(disc_topics) == BASE_ENTITY_COUNT  # one per sensor/binary_sensor
 
     @pytest.mark.asyncio
@@ -628,7 +631,7 @@ class TestPublisherHaDiscovery:
         disc_topics = [
             c.args[0]
             for c in mock_client.publish.call_args_list
-            if "homeassistant" in c.args[0]
+            if "homeassistant" in c.args[0] and c.args[1]  # announced, not cleared
         ]
         assert len(disc_topics) == BASE_ENTITY_COUNT
 
@@ -829,7 +832,7 @@ class TestDiscoveryForLateEntities:
         return [
             c.args[0]
             for c in pub._client.publish.call_args_list
-            if c.args[0].startswith("homeassistant/")
+            if c.args[0].startswith("homeassistant/") and c.args[1]  # announced
         ]
 
     @pytest.mark.asyncio
@@ -1253,7 +1256,7 @@ class TestDeviceSignalsLateDiscovery:
         return [
             c.args[0]
             for c in pub._client.publish.call_args_list
-            if c.args[0].startswith("homeassistant/")
+            if c.args[0].startswith("homeassistant/") and c.args[1]  # announced
         ]
 
     @pytest.mark.asyncio

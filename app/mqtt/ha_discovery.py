@@ -80,11 +80,14 @@ Numeric sensors:
 Controls (MQTT_CONTROLS bitmask + PW_CONTROL_SECRET set, broker-trust;
 only bits in the mask are announced — 1 reserve, 2 mode, 4 grid_charging,
 8 grid_export, 16 islanding):
-    reserve       — number 0-100 % (state reserve, command pypowerwall/{gw}/control/reserve/set)
+    reserve       — number 0-100 % (state reserve)
     mode          — select [self_consumption, backup, autonomous] (state mode)
-    grid_charging — switch (state grid_charging, command .../control/grid_charging/set; only where executable)
-    grid_export   — select [battery_ok, pv_only, never] (state grid_export; only where executable)
-    islanding     — button Go Off Grid / Reconnect Grid (command .../control/islanding/set, confirmed-v1r-only)
+    grid_charging — switch (state grid_charging)
+    grid_export   — select [battery_ok, pv_only, never] (state grid_export)
+    islanding     — buttons Go Off Grid / Reconnect Grid
+Commands go to {prefix}/{gw}/control/{control}/set.
+Reserve, mode and the grid controls are announced only where the gateway can
+write them (cloud, FleetAPI, bound hybrid cloud or v1r); islanding only on v1r.
 
 All sensors share a single "Powerwall" device block so HA groups them together.
 The device model is set from PowerwallData.version when available, otherwise
@@ -222,6 +225,26 @@ def is_v1r_gateway(gateway: Any, data: Any) -> bool:
         return False
 
 
+# Every control entity: (HA component, unique_id suffix). Discovery clears
+# the ones it doesn't announce, so turning a bit off removes the entity.
+CONTROL_ENTITIES = (
+    ("number", "reserve_control"),
+    ("select", "mode_control"),
+    ("switch", "grid_charging_control"),
+    ("select", "grid_export_control"),
+    ("button", "go_off_grid"),
+    ("button", "reconnect_grid"),
+)
+
+
+def control_config_topics(gateway_id: str, ha_prefix: str) -> list[str]:
+    """HA config topics of all control entities a gateway can have."""
+    return [
+        f"{ha_prefix}/{component}/pypowerwall_{gateway_id}_{suffix}/config"
+        for component, suffix in CONTROL_ENTITIES
+    ]
+
+
 def discovery_signature(
     strings: Optional[Dict[str, Any]],
     vitals: Optional[Dict[str, Any]],
@@ -267,8 +290,8 @@ def build_discovery_payloads(
     remote_meters: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
     device_signals: Optional[Dict[str, Dict[str, Any]]] = None,
     controls: int = 0,
+    writable: bool = False,
     is_v1r: bool = False,
-    grid_capable: bool = False,
 ) -> list[tuple[str, str]]:
     """Build all HA auto-discovery (topic, payload) pairs for a gateway.
 
@@ -292,15 +315,12 @@ def build_discovery_payloads(
                        get_fan_speeds()) - {serial: {metric_id: value}}.  When
                        provided, per-unit temperature and fan sensors are
                        added so HA auto-discovers them.
-        controls: MQTT_CONTROLS bitmask — only entities whose bit is set
-                        are added (0 = monitoring only). Grid controls additionally
-                        require grid_capable (the gateway must actually execute
-                        them); islanding buttons require is_v1r.
-        is_v1r:    When True, islanding buttons (Go Off Grid/Reconnect) are added
-                        (v1r transport, PW2 + PW3, like the WebGUI `islanding` section).
-        grid_capable: When True, grid_charging/grid_export controls are added
-                        (cloud, FleetAPI, hybrid-cloud or v1r connection — the
-                        local/TEDAPI-full setters are logging stubs).
+        controls:  MQTT_CONTROLS bitmask: only entities whose bit is set are
+                   added (0 = monitoring only).
+        writable:  The gateway can write reserve, mode and grid settings (cloud,
+                   FleetAPI, bound hybrid cloud or v1r); those four need it.
+        is_v1r:    The gateway uses the v1r transport; the islanding buttons
+                   (PW2 and PW3) need it.
 
     Returns:
         List of (topic, json_payload_str) tuples, one per sensor/binary sensor/control.
@@ -700,7 +720,7 @@ def build_discovery_payloads(
             MQTT_CONTROL_RESERVE,
         )
 
-        if controls & MQTT_CONTROL_RESERVE:
+        if (controls & MQTT_CONTROL_RESERVE) and writable:
             results.append(
                 number(
                     "reserve_control", "Backup Reserve Control",
@@ -711,7 +731,7 @@ def build_discovery_payloads(
                     min_val=0, max_val=100, step=1,
                 )
             )
-        if controls & MQTT_CONTROL_MODE:
+        if (controls & MQTT_CONTROL_MODE) and writable:
             results.append(
                 select(
                     "mode_control", "Operation Mode Control",
@@ -721,9 +741,7 @@ def build_discovery_payloads(
                     icon="mdi:cog",
                 )
             )
-        # Grid setters are logging stubs on connections that cannot execute
-        # them (local/hybrid, TEDAPI full) — announce only when capable.
-        if (controls & MQTT_CONTROL_GRID_CHARGING) and grid_capable:
+        if (controls & MQTT_CONTROL_GRID_CHARGING) and writable:
             results.append(
                 switch(
                     "grid_charging_control", "Grid Charging Control",
@@ -732,7 +750,7 @@ def build_discovery_payloads(
                     icon="mdi:battery-charging-outline",
                 )
             )
-        if (controls & MQTT_CONTROL_GRID_EXPORT) and grid_capable:
+        if (controls & MQTT_CONTROL_GRID_EXPORT) and writable:
             results.append(
                 select(
                     "grid_export_control", "Grid Export Control",
@@ -742,7 +760,7 @@ def build_discovery_payloads(
                     icon="mdi:transmission-tower-export",
                 )
             )
-        # Islanding buttons like the WebGUI gate — v1r transport (PW2 + PW3)
+        # Islanding buttons, like the Console: v1r transport (PW2 + PW3)
         if (controls & MQTT_CONTROL_ISLANDING) and is_v1r:
             results.extend([
                 button(
