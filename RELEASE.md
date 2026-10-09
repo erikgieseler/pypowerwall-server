@@ -4,6 +4,9 @@
 
 ### [0.9.1] - Upcoming
 
+**Added:**
+- **Reserve hold (`reserve_hold`) — set backup reserve to the current SoC without a prior read:** `POST /control/reserve_hold` with `{}` (authenticated like the other control routes, default gateway like `reserve`) reads the cached SoC and calls `set_reserve(int(round(soe)))`; unknown SoC fails closed with 503 (never 0). MQTT: `pypowerwall/{gw}/control/reserve_hold/set` with `{}` plus a Home Assistant `Hold Battery` button — shares Bit `1` with reserve, so no new bit and `31` still means all.
+
 **Fixed:**
 - **Console status no longer flashes red when you come back from the API docs** — going Back restored the page as you left it, including the live connection the browser had closed, so the status banner showed disconnected until it reconnected. The Console now closes that connection quietly when you leave and reconnects as soon as you return; a real disconnect still shows red. Thanks @erikgieseler (#142)
 
