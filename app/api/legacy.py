@@ -417,10 +417,10 @@ async def control_api(
     # /control/reserve: shared cloud connection when configured, else the
     # default gateway's local connection (no cross-fallback).
     if path == "reserve_hold":
-        if "value" in data:
+        if data:
             raise HTTPException(
                 status_code=400,
-                detail="'value' is not allowed for reserve_hold",
+                detail="reserve_hold requires an empty JSON object",
             )
         gateway_id = get_default_gateway()
         status = gateway_manager.get_gateway(gateway_id)
