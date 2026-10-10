@@ -292,7 +292,7 @@ async def control_api(
 
     Reserve hold:
     - POST /control/reserve_hold sets backup reserve to the cached SoC
-      (no "value" field).
+      (takes an empty JSON object).
     """
     verify_control_token(authorization)
 
@@ -411,7 +411,7 @@ async def control_api(
         return result
 
     # reserve_hold: set backup reserve to the current SoC (battery hold).
-    # Separate action without a "value" field so the strict int-only reserve
+    # Takes an empty JSON object so the strict int-only reserve
     # validation above stays untouched. The SoC comes from the poll cache;
     # a missing SoC fails closed with 503 (never 0). Routing mirrors plain
     # /control/reserve: shared cloud connection when configured, else the

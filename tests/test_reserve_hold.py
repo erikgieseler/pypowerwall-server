@@ -83,12 +83,12 @@ def test_hold_nonfinite_soc_returns_503(hold_client, connected_gateway):
 
 
 def test_hold_value_field_rejected(hold_client, connected_gateway):
-    """A 'value' field is not allowed for reserve_hold (clear separation)."""
-    response = hold_client.post(
-        "/control/reserve_hold", json={"value": 20}, headers=_auth()
-    )
-
-    assert response.status_code == 400
+    """Any non-empty object is rejected (empty-object-only contract)."""
+    for body in ({"value": 20}, {"unexpected": True}):
+        response = hold_client.post(
+            "/control/reserve_hold", json=body, headers=_auth()
+        )
+        assert response.status_code == 400
 
 
 def test_hold_requires_auth(hold_client, connected_gateway):
@@ -216,9 +216,9 @@ async def test_mqtt_reserve_hold_applies_soc(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_mqtt_reserve_hold_invalid_rejected(monkeypatch):
-    """'value' payloads are ignored (no write)."""
+    """Non-empty payloads are ignored (no write)."""
     mock_local = _hold_gateway(monkeypatch, soe=67.3)
-    await _run(_cmd({"value": 50}))
+    await _run(_cmd({"value": 50}), _cmd({"unexpected": True}))
     mock_local.assert_not_called()
 
 

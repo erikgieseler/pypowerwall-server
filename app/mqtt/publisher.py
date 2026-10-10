@@ -1069,11 +1069,12 @@ class MqttPublisher:
                 audit = f"action={action} via local v1r"
                 ok = _island_ack_ok(result)
             elif control == "reserve_hold":
-                # Battery hold: reserve = cached SoC. No "value" field.
-                if "value" in payload:
+                # Battery hold: reserve = cached SoC. Takes an empty JSON
+                # object; anything else is rejected below.
+                if payload:
                     logger.warning(
-                        f"{label} rejected: 'value' is not allowed "
-                        "for reserve_hold"
+                        f"{label} rejected: reserve_hold requires "
+                        "an empty JSON object"
                     )
                     return
                 hold_status = gateway_manager.get_gateway(gateway_id)
