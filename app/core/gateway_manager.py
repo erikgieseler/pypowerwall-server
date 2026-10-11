@@ -2375,6 +2375,118 @@ class GatewayManager:
             logger.warning(f"[{gateway_id}] local_control({method}) error: {e}")
             return None
 
+    def _is_confirmed_v1r(self, gateway_id: str) -> bool:
+        """True when the gateway is confirmed on the v1r transport.
+
+        Same fail-closed rule as the MQTT controls (RSA key configured and
+        ``tedapi_mode == 'v1r'`` from a live poll): an unknown mode (cold
+        start, cloud failover) is not v1r.
+        """
+        try:
+            from app.mqtt.ha_discovery import is_v1r_gateway
+
+            status = self.get_gateway(gateway_id)
+            return is_v1r_gateway(
+                self.gateways.get(gateway_id),
+                status.data if status else None,
+            )
+        except Exception:
+            return False
+
+    def _is_lan_failed(self, gateway_id: str) -> bool:
+        """True when the library tripped its LAN to WiFi failover.
+
+        Reads the same ``pw.tedapi`` handle the poll loop already
+        dereferences: ``lan_failed`` means LAN requests fail and the WiFi
+        host is serving, so a local v1r write (LAN-only) cannot dispatch.
+        Fail-closed: anything unknown means the LAN is assumed up.
+        """
+        try:
+            pw = self.connections.get(gateway_id)
+            return bool(getattr(getattr(pw, "tedapi", None), "lan_failed", False))
+        except Exception:
+            return False
+
+    async def control_write(
+        self, gateway_id: str, method: str, *args, timeout: float = 10.0, **kwargs
+    ) -> Tuple[Optional[str], Optional[Any]]:
+        """Write a reserve/mode/grid control with the configured priority.
+
+        Returns ``(path_label, result)`` when this helper takes the write,
+        else ``(None, None)`` — the caller then runs its historical dispatch
+        verbatim. The helper only acts with ``PW_LOCAL_FIRST=true`` on a
+        confirmed v1r transport; in every other case (flag off, non-v1r)
+        behavior is byte-identical to before, because the historical
+        HTTP and MQTT dispatch rules genuinely differ (HTTP: any cloud
+        connection wins, even an ambiguous-site one; MQTT: strict
+        ``_write_path`` order) and no single shared default could
+        reproduce both.
+
+        With ``PW_LOCAL_FIRST=true``, a confirmed v1r transport is tried
+        first — unless the library itself tripped its LAN to WiFi failover
+        (``lan_failed``): local v1r writes are LAN-only, so with the ESP32
+        bridge serving there is nothing to dispatch locally and the
+        strictly bound cloud connection is used straight away. The cloud
+        connection otherwise runs as failover only when the local write
+        provably never dispatched: no local connection object exists for
+        the gateway. Any dispatched attempt — success, timeout (None)
+        or a library error dict — is final and never followed by a second
+        write: a timed-out write may still have been applied, and blindly
+        failing over would risk double-applying or racing two async
+        command paths (issue #149). A failed write returns HTTP 503 (or an
+        MQTT failed-warning) so the caller can retry deliberately.
+        Absolute-value controls (reserve, mode, grid settings) converge on
+        the same target state either way.
+
+        Islanding methods must not go through here (always local v1r).
+        """
+        # Late import per repo convention (avoids circular dependency).
+        from app.config import settings
+
+        if not settings.local_first or not self._is_confirmed_v1r(gateway_id):
+            return None, None
+        cloud_bound = (
+            self._cloud_control is not None
+            and self._cloud_control_gateway_id == gateway_id
+        )
+        if self._is_lan_failed(gateway_id):
+            # Definitive: the library routes via WiFi, and config writes
+            # don't use that path — skipping the doomed LAN attempt also
+            # spares the caller a full timeout wait.
+            logger.info(
+                f"[{gateway_id}] control_write({method}): LAN failed, "
+                "using cloud (WiFi fallback is serving reads)"
+            )
+            if cloud_bound:
+                result = await self.cloud_control(
+                    method, *args, timeout=timeout, **kwargs
+                )
+                return "hybrid cloud (lan-failover)", result
+            return "local v1r", None
+        if self.connections.get(gateway_id) is None:
+            # Definitive: nothing could have been dispatched locally, so a
+            # single cloud failover cannot double-apply.
+            logger.info(
+                f"[{gateway_id}] control_write({method}): no local "
+                "connection, trying cloud failover"
+            )
+            if cloud_bound:
+                result = await self.cloud_control(
+                    method, *args, timeout=timeout, **kwargs
+                )
+                return "hybrid cloud (failover)", result
+            return "local v1r", None
+        logger.info(
+            f"[{gateway_id}] control_write({method}): trying local v1r first"
+        )
+        result = await self.local_control(
+            gateway_id, method, *args, timeout=timeout, **kwargs
+        )
+        # Final, whatever came back: a timeout (None) may still have been
+        # applied, and an error dict means the gateway answered. Either
+        # way a second write on another path could race it.
+        return "local v1r", result
+
     async def call_tedapi(
         self,
         gateway_id: str,

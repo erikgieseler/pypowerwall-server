@@ -19,6 +19,11 @@
   - TEDAPI `/api/site_info` is filled (jasonacox/pypowerwall#420), and `/vitals` PVAC blocks no longer pick up `PVS_String*_Connected` after a `/strings` call (jasonacox/pypowerwall#414).
   - Interactive Tesla login and Fleet API setup no longer print tokens to the console (jasonacox/pypowerwall#417).
 
+### [0.11.0] - Upcoming
+
+**Added:**
+- **`PW_LOCAL_FIRST` (opt-in, default `false`)** — with `PW_LOCAL_FIRST=true`, reserve/mode/grid control writes (HTTP and MQTT) try a confirmed local v1r transport first — unless the library tripped its LAN to WiFi failover (local v1r writes are LAN-only), in which case the strictly bound cloud connection is used straight away. The cloud connection otherwise runs as failover only when the local write provably never dispatched (no local connection object for the gateway); any dispatched attempt — success, timeout or library error — is final and never followed by a second write, since a timed-out write may still have been applied. Default `false` keeps the historical behavior (cloud first when configured). Islanding is untouched (always local v1r). Covers the LAN-up / internet-down case; when the LAN itself is down and the WiFi fallback is active, cloud stays the write path. (issue #149)
+
 ### [0.9.1] - 2026-10-10
 
 **Fixed:**

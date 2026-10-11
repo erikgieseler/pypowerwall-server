@@ -278,6 +278,7 @@ def test_control_reserve_routes_to_cloud(
     mock_cloud = Mock()
     mock_cloud.set_reserve.return_value = {"result": "Updated"}
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/reserve",
@@ -298,6 +299,7 @@ def test_control_mode_routes_to_cloud(
     mock_cloud = Mock()
     mock_cloud.set_mode.return_value = {"result": "Updated"}
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/mode",
@@ -318,6 +320,7 @@ def test_control_grid_charging_routes_to_cloud(
     mock_cloud = Mock()
     mock_cloud.set_grid_charging.return_value = {"result": "Updated"}
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/grid_charging",
@@ -338,6 +341,7 @@ def test_control_grid_charging_disable(
     mock_cloud = Mock()
     mock_cloud.set_grid_charging.return_value = {"result": "Updated"}
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/grid_charging",
@@ -357,6 +361,7 @@ def test_control_grid_charging_missing_value_returns_400(
 
     mock_cloud = Mock()
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/grid_charging",
@@ -375,6 +380,7 @@ def test_control_grid_charging_non_boolean_value_returns_400(
 
     mock_cloud = Mock()
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/grid_charging",
@@ -395,6 +401,7 @@ def test_control_grid_export_routes_to_cloud(
     mock_cloud = Mock()
     mock_cloud.set_grid_export.return_value = {"result": "Updated"}
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/grid_export",
@@ -430,6 +437,7 @@ def test_control_grid_export_invalid_value_returns_400(
 
     mock_cloud = Mock()
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/grid_export",
@@ -466,6 +474,7 @@ def test_control_cloud_returns_none_gives_503(
     mock_cloud = Mock()
     mock_cloud.set_reserve.return_value = None
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/reserve",
@@ -525,6 +534,7 @@ def test_control_unmapped_path_uses_call_api(
 
     mock_cloud = Mock()
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
     mock_pypowerwall.post.return_value = {"result": "OK"}
 
     response = control_client.post(
@@ -598,6 +608,7 @@ def test_control_reserve_with_valid_mode_calls_set_operation(
     mock_cloud = Mock()
     mock_cloud.set_operation.return_value = {"result": "Updated"}
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/reserve",
@@ -620,6 +631,7 @@ def test_control_mode_with_valid_level_calls_set_operation(
     mock_cloud = Mock()
     mock_cloud.set_operation.return_value = {"result": "Updated"}
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/mode",
@@ -641,6 +653,7 @@ def test_control_reserve_with_invalid_mode_returns_400(
 
     mock_cloud = Mock()
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/reserve",
@@ -661,6 +674,7 @@ def test_control_mode_with_invalid_level_returns_400(
 
     mock_cloud = Mock()
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/mode",
@@ -681,6 +695,7 @@ def test_control_reserve_with_boolean_value_returns_400(
 
     mock_cloud = Mock()
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/reserve",
@@ -701,6 +716,7 @@ def test_control_mode_with_boolean_level_returns_400(
 
     mock_cloud = Mock()
     gateway_manager._cloud_control = mock_cloud
+    gateway_manager._cloud_control_gateway_id = "test-gateway"
 
     response = control_client.post(
         "/control/mode",
