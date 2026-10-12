@@ -1,15 +1,12 @@
 # Release Notes
 
-## Upcoming
-
-**Added:**
-- **MQTT: per-battery capacity and charge** — each battery block now publishes `{prefix}/{gw}/batteries/{n}/capacity` and `{prefix}/{gw}/batteries/{n}/charge` (Wh) plus a `{prefix}/{gw}/batteries` JSON summary, with matching Home Assistant sensors, so individual battery degradation can be tracked instead of just the site aggregate. Battery numbering follows the gateway's block order and survives a block temporarily going silent, and only measurements the gateway actually reports are announced. (#150)
-
 ## Version History
 
-### [0.9.2] - Upcoming
+### [0.10.0] - Upcoming
 
 **Added:**
+- **Reserve hold (`reserve_hold`) — set backup reserve to the current SoC without a prior read:** `POST /control/reserve_hold` with `{}` (authenticated like the other control routes, default gateway like `reserve`) reads the SoC from a live poll and calls `set_reserve()` with the value rounded down; unknown or stale SoC fails closed with 503 (never 0). MQTT: `pypowerwall/{gw}/control/reserve_hold/set` with `{}` plus a Home Assistant `Hold Battery` button — shares Bit `1` with reserve, so anyone with that bit gets the new button on upgrade and `31` still means all. To release a hold, set the reserve back with `POST /control/reserve` or the Backup Reserve number.
+- **MQTT: per-battery capacity and charge** — each battery block now publishes `{prefix}/{gw}/batteries/{n}/capacity` and `{prefix}/{gw}/batteries/{n}/charge` (Wh) plus a `{prefix}/{gw}/batteries` JSON summary, with matching Home Assistant sensors, so individual battery degradation can be tracked instead of just the site aggregate. Battery numbering follows the gateway's block order and survives a block temporarily going silent, and only measurements the gateway actually reports are announced. (#150)
 - **Gateway uptime and Installed, Commissioned and Restarted dates on the Console** — the System Health card shows the gateway's uptime next to the server's, and when the system was installed (cloud/FleetAPI), the batteries commissioned (TEDAPI) and the gateway last restarted (TEDAPI with a Backup Gateway), as plain dates (hover over Restarted for the exact time). Each appears only when the gateway reports it. `/api/status` passes through the library's `battery_commission_date` / `installation_date`.
 
 **Fixed:**
