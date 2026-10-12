@@ -836,7 +836,7 @@ curl -X POST http://localhost:8675/control/mode \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"value": "self_consumption", "level": 20}'
 
-# Hold battery: set reserve to the current SoC (no prior GET needed)
+# Hold battery: set reserve to the current SoC (no prior GET needed; Tesla caps the reserve at 80%)
 curl -X POST http://localhost:8675/control/reserve_hold \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{}'
