@@ -2,6 +2,11 @@
 
 ## Version History
 
+### [0.11.0] - Upcoming
+
+**Added:**
+- **Task watchdog for poll and TEDAPI probe loops** — every cyclic background task records a heartbeat each iteration; a watchdog (60 s) recreates finished tasks with a warning and force-recreates live tasks whose heartbeat went stale three times running (cancel + recreate, at most once per 10 min per task, so a merely slow task is never duplicated). Executor queue saturation is logged too. A failed cloud-control init is retried (at most every 5 min) while control is configured but unconnected, so a dead Tesla cloud at boot no longer means permanently unavailable control. Motivated by a gateway firmware-update reboot after which the probe task went silent for hours with zero log output, holding reads on cloud until a container restart.
+
 ### [0.10.0] - 2026-10-11
 
 **Added:**
