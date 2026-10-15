@@ -2029,15 +2029,19 @@ class GatewayManager:
         """Record a liveness heartbeat for a cyclic background task."""
         self._task_beats[name] = time.monotonic()
 
-    def _executor_pending(self) -> Optional[int]:
-        """Queued (not yet running) executor jobs, or None when unknown."""
+    def _pool_pending(self, pool: object) -> Optional[int]:
+        """Queued (not yet running) jobs of one executor, None when unknown."""
         try:
-            queue = getattr(self._executor, "_work_queue", None)
+            queue = getattr(pool, "_work_queue", None)
             if queue is None:
                 return None
             return int(queue.qsize())
         except Exception:
             return None
+
+    def _executor_pending(self) -> Optional[int]:
+        """Queued (not yet running) executor jobs, or None when unknown."""
+        return self._pool_pending(self._executor)
 
     def _probe_executor_or_main(self) -> Optional[ThreadPoolExecutor]:
         """Executor for probe blocking calls: dedicated pool when present.
@@ -2047,16 +2051,53 @@ class GatewayManager:
         """
         return self._probe_executor or self._executor
 
-    def _executor_saturated(self) -> bool:
-        """True when queued jobs exceed twice the worker count."""
+    def _pool_saturated(self, pool: object) -> bool:
+        """True when a pool's queued jobs exceed twice its worker count."""
         try:
-            queue = getattr(self._executor, "_work_queue", None)
-            workers = getattr(self._executor, "_max_workers", 0) or 0
-            if queue is None or not workers:
+            workers = getattr(pool, "_max_workers", 0) or 0
+            pending = self._pool_pending(pool)
+            if pending is None or not workers:
                 return False
-            return int(queue.qsize()) > 2 * workers
+            return pending > 2 * workers
         except Exception:
             return False
+
+    def _executor_saturated(self) -> bool:
+        """True when queued jobs exceed twice the worker count."""
+        return self._pool_saturated(self._executor)
+
+    def _saturated_pools(self) -> List[str]:
+        """Labels of currently saturated executors (main, probe)."""
+        return [
+            label
+            for label, pool in (
+                ("main", self._executor),
+                ("probe", self._probe_executor),
+            )
+            if self._pool_saturated(pool)
+        ]
+
+    def _log_pool_saturation(self, label: str, pool: object) -> None:
+        """Warn on a saturated pool, debug-log a healthy one (per pool)."""
+        pending = self._pool_pending(pool)
+        workers = getattr(pool, "_max_workers", 0) or 0
+        if pending is None or not workers:
+            return
+        if pending > 2 * workers:
+            logger.warning(
+                "Task watchdog: %s executor saturated "
+                "(%d queued for %d workers)",
+                label,
+                pending,
+                workers,
+            )
+        else:
+            logger.debug(
+                "Task watchdog: %s executor %d queued / %d workers",
+                label,
+                pending,
+                workers,
+            )
 
     def _watch_task(
         self,
@@ -2077,7 +2118,7 @@ class GatewayManager:
         safe). A live task with a stale heartbeat is watched first: only
         after _WATCHDOG_FORCE_AFTER consecutive stale observations — and at
         most once per _WATCHDOG_FORCE_COOLDOWN_S — is it cancelled and
-        recreated, unless the executor is saturated (recreating into a
+        recreated, unless any executor is saturated (recreating into a
         starved pool cannot help; the saturation warning carries the
         diagnosis instead). Both loops tolerate cancellation
         (CancelledError breaks them) and are idempotent cyclic tasks, so a
@@ -2117,15 +2158,17 @@ class GatewayManager:
             strikes >= self._WATCHDOG_FORCE_AFTER
             and now - last_forced >= self._WATCHDOG_FORCE_COOLDOWN_S
         ):
-            if self._executor_saturated():
+            blocked = self._saturated_pools()
+            if blocked:
                 # Recreating into a saturated pool cannot help: the new
                 # task would stall on the same queue. Report and wait —
                 # the saturation warning carries the diagnosis.
                 logger.warning(
-                    "Task watchdog: %s wedged for %.0fs but executor "
+                    "Task watchdog: %s wedged for %.0fs but %s executor "
                     "saturated, skipping force, diagnose pool",
                     name,
                     age,
+                    ",".join(blocked),
                 )
                 return
             logger.warning(
@@ -2224,22 +2267,11 @@ class GatewayManager:
                 now,
                 watch_probe,
             )
-        pending = self._executor_pending()
-        workers = getattr(self._executor, "_max_workers", 0) or 0
-        if pending is not None and workers:
-            if pending > 2 * workers:
-                logger.warning(
-                    "Task watchdog: executor saturated "
-                    "(%d queued for %d workers)",
-                    pending,
-                    workers,
-                )
-            else:
-                logger.debug(
-                    "Task watchdog: executor %d queued / %d workers",
-                    pending,
-                    workers,
-                )
+        for label, pool in (
+            ("main", self._executor),
+            ("probe", self._probe_executor),
+        ):
+            self._log_pool_saturation(label, pool)
         self._watch_cloud_control(now)
 
     async def _task_watchdog_loop(self) -> None:

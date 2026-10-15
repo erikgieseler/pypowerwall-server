@@ -652,6 +652,84 @@ async def test_watchdog_cloud_retry_works_on_fresh_boot(
 
 
 @pytest.mark.asyncio
+async def test_watchdog_reports_probe_pool_saturation(
+    gm, monkeypatch, caplog
+):
+    """A saturated probe pool is detected and named (main stays quiet)."""
+    monkeypatch.setattr(
+        gateway_manager, "_poll_gateway_loop", lambda gid: asyncio.sleep(0)
+    )
+    probe = await _live_seed("tedapi-probe-gw")
+    alive = asyncio.create_task(asyncio.sleep(3600))
+    gateway_manager._poll_tasks["gw"] = alive
+    gateway_manager._beat("poll-gw")
+    pool = Mock()
+    pool._max_workers = 2
+    queue = Mock()
+    queue.qsize.return_value = 5
+    pool._work_queue = queue
+    monkeypatch.setattr(gateway_manager, "_probe_executor", pool)
+    try:
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            gateway_manager._watchdog_check()
+        assert any(
+            "probe executor saturated" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        alive.cancel()
+        probe.cancel()
+        try:
+            await alive
+        except asyncio.CancelledError:
+            pass
+        try:
+            await probe
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_watchdog_skips_force_when_only_probe_saturated(
+    gm, monkeypatch, caplog
+):
+    """Force is skipped when the probe pool alone is saturated."""
+    monkeypatch.setattr(
+        gateway_manager, "_poll_gateway_loop", lambda gid: asyncio.sleep(0)
+    )
+    probe = await _live_seed("tedapi-probe-gw")
+    stuck = await _stuck_task()
+    gateway_manager._poll_tasks["gw"] = stuck
+    pool = Mock()
+    pool._max_workers = 2
+    queue = Mock()
+    queue.qsize.return_value = 5
+    pool._work_queue = queue
+    monkeypatch.setattr(gateway_manager, "_probe_executor", pool)
+    try:
+        for _ in range(3):
+            _stale_beat()
+            with caplog.at_level(logging.WARNING, logger=LOGGER):
+                gateway_manager._watchdog_check()
+        assert gateway_manager._poll_tasks["gw"] is stuck
+        assert any(
+            "probe" in r.getMessage() and "skipping force" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        probe.cancel()
+        stuck.cancel()
+        try:
+            await probe
+        except asyncio.CancelledError:
+            pass
+        try:
+            await stuck
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
 async def test_poll_loop_records_heartbeat(gm):
     """The poll loop beats each iteration (backoff skip, no network)."""
     gateway_manager._next_poll_time["nogw"] = time.time() + 3600
@@ -682,6 +760,29 @@ async def test_shutdown_stops_watchdog_first(gm):
     await gateway_manager.shutdown()
     assert gateway_manager._watchdog_task is None
     assert wd.done()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_stops_probe_executor(gm, monkeypatch):
+    """shutdown() shuts down the dedicated probe pool and clears it."""
+    from unittest.mock import Mock
+
+    pool = Mock()
+    monkeypatch.setattr(gateway_manager, "_probe_executor", pool)
+    await gateway_manager.shutdown()
+    pool.shutdown.assert_called_once_with(wait=False)
+    assert gateway_manager._probe_executor is None
+
+
+def test_pool_saturated_false_on_broken_pool(gm):
+    """A pool that raises on introspection degrades to unknown (False)."""
+
+    class _Boom:
+        def __getattr__(self, name):
+            raise RuntimeError("no introspection")
+
+    assert gateway_manager._pool_saturated(_Boom()) is False
+    assert gateway_manager._pool_pending(_Boom()) is None
 
 
 @pytest.mark.asyncio
