@@ -168,12 +168,12 @@ async def test_watchdog_warns_on_executor_saturation(
         pass
 
 
-def test_executor_pending_none_without_executor(gm):
+def test_pool_pending_none_without_executor(gm):
     """No executor (tests, early startup): saturation check is skipped."""
-    assert gateway_manager._executor_pending() is None
+    assert gateway_manager._pool_pending(gateway_manager._executor) is None
 
 
-def test_executor_pending_none_when_queue_unreadable(gm, monkeypatch):
+def test_pool_pending_none_when_queue_unreadable(gm, monkeypatch):
     """A broken queue read degrades to unknown instead of raising."""
 
     executor = Mock()
@@ -181,7 +181,7 @@ def test_executor_pending_none_when_queue_unreadable(gm, monkeypatch):
     queue.qsize.side_effect = RuntimeError("nope")
     executor._work_queue = queue
     monkeypatch.setattr(gateway_manager, "_executor", executor)
-    assert gateway_manager._executor_pending() is None
+    assert gateway_manager._pool_pending(gateway_manager._executor) is None
 
 
 @pytest.mark.asyncio
@@ -518,9 +518,9 @@ async def test_watchdog_skips_force_when_saturated(
 
 
 @pytest.mark.asyncio
-async def test_executor_saturated_false_without_pool(gm):
+async def test_pool_saturated_false_without_pool(gm):
     """No executor, no saturation verdict."""
-    assert gateway_manager._executor_saturated() is False
+    assert gateway_manager._pool_saturated(gateway_manager._executor) is False
 
 
 @pytest.mark.asyncio
@@ -554,9 +554,9 @@ async def test_chaos_saturated_pool_skips_then_heals_after_drain(
     try:
         for _ in range(60):
             await asyncio.sleep(0.1)
-            if gateway_manager._executor_saturated():
+            if gateway_manager._pool_saturated(gateway_manager._executor):
                 break
-        assert gateway_manager._executor_saturated() is True
+        assert gateway_manager._pool_saturated(gateway_manager._executor) is True
         stuck = asyncio.create_task(asyncio.sleep(3600))
         gateway_manager._poll_tasks["gw"] = stuck
         gateway_manager._task_stale_counts["poll-gw"] = 2
@@ -569,9 +569,9 @@ async def test_chaos_saturated_pool_skips_then_heals_after_drain(
         gate.set()
         for _ in range(60):
             await asyncio.sleep(0.1)
-            if not gateway_manager._executor_saturated():
+            if not gateway_manager._pool_saturated(gateway_manager._executor):
                 break
-        assert gateway_manager._executor_saturated() is False
+        assert gateway_manager._pool_saturated(gateway_manager._executor) is False
         _stale_beat()
         with caplog.at_level(logging.WARNING, logger=LOGGER):
             gateway_manager._watchdog_check()
@@ -690,10 +690,10 @@ async def test_watchdog_reports_probe_pool_saturation(
 
 
 @pytest.mark.asyncio
-async def test_watchdog_skips_force_when_only_probe_saturated(
+async def test_watchdog_forces_poll_task_when_only_probe_saturated(
     gm, monkeypatch, caplog
 ):
-    """Force is skipped when the probe pool alone is saturated."""
+    """A poll task is healed although the unrelated probe pool is full."""
     monkeypatch.setattr(
         gateway_manager, "_poll_gateway_loop", lambda gid: asyncio.sleep(0)
     )
@@ -711,9 +711,9 @@ async def test_watchdog_skips_force_when_only_probe_saturated(
             _stale_beat()
             with caplog.at_level(logging.WARNING, logger=LOGGER):
                 gateway_manager._watchdog_check()
-        assert gateway_manager._poll_tasks["gw"] is stuck
+        assert gateway_manager._poll_tasks["gw"] is not stuck
         assert any(
-            "probe" in r.getMessage() and "skipping force" in r.getMessage()
+            "cancelling and recreating" in r.getMessage()
             for r in caplog.records
         )
     finally:
@@ -725,6 +725,161 @@ async def test_watchdog_skips_force_when_only_probe_saturated(
             pass
         try:
             await stuck
+        except asyncio.CancelledError:
+            pass
+        current = gateway_manager._poll_tasks.get("gw")
+        if current is not None and not current.done():
+            current.cancel()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_skips_probe_force_when_probe_saturated(
+    gm, monkeypatch, caplog
+):
+    """A wedged probe task is skipped while its own pool is saturated."""
+    monkeypatch.setattr(
+        gateway_manager, "_poll_gateway_loop", lambda gid: asyncio.sleep(0)
+    )
+    alive = asyncio.create_task(asyncio.sleep(3600))
+    gateway_manager._poll_tasks["gw"] = alive
+    gateway_manager._beat("poll-gw")
+    stuck = asyncio.create_task(asyncio.sleep(3600))
+    gateway_manager._probe_tasks["gw"] = stuck
+    gateway_manager._task_beats["tedapi-probe-gw"] = (
+        time.monotonic() - gateway_manager._WATCHDOG_PROBE_STALE_S - 1
+    )
+    pool = Mock()
+    pool._max_workers = 2
+    queue = Mock()
+    queue.qsize.return_value = 5
+    pool._work_queue = queue
+    monkeypatch.setattr(gateway_manager, "_probe_executor", pool)
+    try:
+        for _ in range(3):
+            with caplog.at_level(logging.WARNING, logger=LOGGER):
+                gateway_manager._watchdog_check()
+        assert gateway_manager._probe_tasks["gw"] is stuck
+        assert any(
+            "probe" in r.getMessage() and "skipping force" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        alive.cancel()
+        stuck.cancel()
+        try:
+            await alive
+        except asyncio.CancelledError:
+            pass
+        try:
+            await stuck
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_watchdog_forces_probe_task_when_only_main_saturated(
+    gm, monkeypatch, caplog
+):
+    """A wedged probe task is healed although only the main pool is full."""
+    monkeypatch.setattr(
+        gateway_manager, "_poll_gateway_loop", lambda gid: asyncio.sleep(0)
+    )
+    alive = asyncio.create_task(asyncio.sleep(3600))
+    gateway_manager._poll_tasks["gw"] = alive
+    gateway_manager._beat("poll-gw")
+    stuck = asyncio.create_task(asyncio.sleep(3600))
+    gateway_manager._probe_tasks["gw"] = stuck
+    gateway_manager._task_beats["tedapi-probe-gw"] = (
+        time.monotonic() - gateway_manager._WATCHDOG_PROBE_STALE_S - 1
+    )
+    main = Mock()
+    main._max_workers = 10
+    main_q = Mock()
+    main_q.qsize.return_value = 25
+    main._work_queue = main_q
+    monkeypatch.setattr(gateway_manager, "_executor", main)
+    healthy_probe = Mock()
+    healthy_probe._max_workers = 2
+    healthy_q = Mock()
+    healthy_q.qsize.return_value = 0
+    healthy_probe._work_queue = healthy_q
+    monkeypatch.setattr(gateway_manager, "_probe_executor", healthy_probe)
+    try:
+        for _ in range(3):
+            with caplog.at_level(logging.WARNING, logger=LOGGER):
+                gateway_manager._watchdog_check()
+        assert gateway_manager._probe_tasks["gw"] is not stuck
+        assert any(
+            "cancelling and recreating" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        alive.cancel()
+        stuck.cancel()
+        try:
+            await alive
+        except asyncio.CancelledError:
+            pass
+        try:
+            await stuck
+        except asyncio.CancelledError:
+            pass
+        current = gateway_manager._probe_tasks.get("gw")
+        if current is not None and not current.done():
+            current.cancel()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_both_pools_saturated_skips_both(
+    gm, monkeypatch, caplog
+):
+    """Both pools full: each wedged task is judged by its own pool."""
+    monkeypatch.setattr(
+        gateway_manager, "_poll_gateway_loop", lambda gid: asyncio.sleep(0)
+    )
+    stuck_poll = await _stuck_task()
+    gateway_manager._poll_tasks["gw"] = stuck_poll
+    _stale_beat()
+    stuck_probe = asyncio.create_task(asyncio.sleep(3600))
+    gateway_manager._probe_tasks["gw"] = stuck_probe
+    gateway_manager._task_beats["tedapi-probe-gw"] = (
+        time.monotonic() - gateway_manager._WATCHDOG_PROBE_STALE_S - 1
+    )
+    main = Mock()
+    main._max_workers = 10
+    main_q = Mock()
+    main_q.qsize.return_value = 25
+    main._work_queue = main_q
+    monkeypatch.setattr(gateway_manager, "_executor", main)
+    probe_pool = Mock()
+    probe_pool._max_workers = 2
+    probe_q = Mock()
+    probe_q.qsize.return_value = 5
+    probe_pool._work_queue = probe_q
+    monkeypatch.setattr(gateway_manager, "_probe_executor", probe_pool)
+    try:
+        for _ in range(3):
+            _stale_beat()
+            with caplog.at_level(logging.WARNING, logger=LOGGER):
+                gateway_manager._watchdog_check()
+        assert gateway_manager._poll_tasks["gw"] is stuck_poll
+        assert gateway_manager._probe_tasks["gw"] is stuck_probe
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            "main" in m and "skipping force" in m for m in messages
+        )
+        assert any(
+            "probe" in m and "skipping force" in m for m in messages
+        )
+    finally:
+        stuck_poll.cancel()
+        stuck_probe.cancel()
+        try:
+            await stuck_poll
+        except asyncio.CancelledError:
+            pass
+        try:
+            await stuck_probe
         except asyncio.CancelledError:
             pass
 

@@ -2039,10 +2039,6 @@ class GatewayManager:
         except Exception:
             return None
 
-    def _executor_pending(self) -> Optional[int]:
-        """Queued (not yet running) executor jobs, or None when unknown."""
-        return self._pool_pending(self._executor)
-
     def _probe_executor_or_main(self) -> Optional[ThreadPoolExecutor]:
         """Executor for probe blocking calls: dedicated pool when present.
 
@@ -2061,21 +2057,6 @@ class GatewayManager:
             return pending > 2 * workers
         except Exception:
             return False
-
-    def _executor_saturated(self) -> bool:
-        """True when queued jobs exceed twice the worker count."""
-        return self._pool_saturated(self._executor)
-
-    def _saturated_pools(self) -> List[str]:
-        """Labels of currently saturated executors (main, probe)."""
-        return [
-            label
-            for label, pool in (
-                ("main", self._executor),
-                ("probe", self._probe_executor),
-            )
-            if self._pool_saturated(pool)
-        ]
 
     def _log_pool_saturation(self, label: str, pool: object) -> None:
         """Warn on a saturated pool, debug-log a healthy one (per pool)."""
@@ -2118,9 +2099,10 @@ class GatewayManager:
         safe). A live task with a stale heartbeat is watched first: only
         after _WATCHDOG_FORCE_AFTER consecutive stale observations — and at
         most once per _WATCHDOG_FORCE_COOLDOWN_S — is it cancelled and
-        recreated, unless any executor is saturated (recreating into a
-        starved pool cannot help; the saturation warning carries the
-        diagnosis instead). Both loops tolerate cancellation
+        recreated. The skip decision uses only the pool this task actually
+        runs on (poll tasks: shared pool; probe tasks: dedicated pool or
+        shared pool as fallback) — judging by an unrelated saturated pool
+        would skip healing that could work. Both loops tolerate cancellation
         (CancelledError breaks them) and are idempotent cyclic tasks, so a
         duplicate during the handover does no harm; leaked executor threads
         from the old task time out on their own socket timeouts.
@@ -2158,8 +2140,11 @@ class GatewayManager:
             strikes >= self._WATCHDOG_FORCE_AFTER
             and now - last_forced >= self._WATCHDOG_FORCE_COOLDOWN_S
         ):
-            blocked = self._saturated_pools()
-            if blocked:
+            if name.startswith("tedapi-probe-") and self._probe_executor is not None:
+                pool_label, pool = "probe", self._probe_executor
+            else:
+                pool_label, pool = "main", self._executor
+            if self._pool_saturated(pool):
                 # Recreating into a saturated pool cannot help: the new
                 # task would stall on the same queue. Report and wait —
                 # the saturation warning carries the diagnosis.
@@ -2168,7 +2153,7 @@ class GatewayManager:
                     "saturated, skipping force, diagnose pool",
                     name,
                     age,
-                    ",".join(blocked),
+                    pool_label,
                 )
                 return
             logger.warning(
