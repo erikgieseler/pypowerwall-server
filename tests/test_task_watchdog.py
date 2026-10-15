@@ -885,6 +885,78 @@ async def test_watchdog_both_pools_saturated_skips_both(
 
 
 @pytest.mark.asyncio
+async def test_watchdog_force_during_executor_wait_ends_old_task(
+    gm, monkeypatch, caplog
+):
+    """Force while the old task awaits run_in_executor: it ends reliably,
+    the registry points at the replacement, the thread outlives briefly
+    (inherent) and then ends too — no uncontrolled parallel recovery."""
+    import threading
+
+    monkeypatch.setattr(
+        gateway_manager, "_poll_gateway_loop", lambda gid: asyncio.sleep(0)
+    )
+    probe = await _live_seed("tedapi-probe-gw")
+    gate = threading.Event()
+    thread_exited = threading.Event()
+    old_cancelled = asyncio.Event()
+
+    def _park():
+        gate.wait()
+        thread_exited.set()
+
+    async def _old_loop():
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, _park)
+        except asyncio.CancelledError:
+            old_cancelled.set()
+            raise
+
+    old = asyncio.create_task(_old_loop())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    gateway_manager._poll_tasks["gw"] = old
+    gateway_manager._task_stale_counts["poll-gw"] = 2
+    _stale_beat()
+    try:
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            gateway_manager._watchdog_check()
+        replacement = gateway_manager._poll_tasks["gw"]
+        assert replacement is not old
+        assert any(
+            "cancelling and recreating" in r.getMessage()
+            for r in caplog.records
+        )
+        # Overlap window exists by asyncio design: cancel is delivered,
+        # not synchronous. The old task ends on delivery...
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert old.done()
+        assert old_cancelled.is_set()
+        # ...while its thread is still parked (inherent to executors) ...
+        assert not thread_exited.is_set()
+        # ...and ends once unblocked. No parallel recovery afterwards:
+        # the replacement is a fresh loop, the old one is done.
+        gate.set()
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if thread_exited.is_set():
+                break
+        assert thread_exited.is_set()
+    finally:
+        gate.set()
+        probe.cancel()
+        try:
+            await probe
+        except asyncio.CancelledError:
+            pass
+        current = gateway_manager._poll_tasks.get("gw")
+        if current is not None and not current.done():
+            current.cancel()
+
+
+@pytest.mark.asyncio
 async def test_poll_loop_records_heartbeat(gm):
     """The poll loop beats each iteration (backoff skip, no network)."""
     gateway_manager._next_poll_time["nogw"] = time.time() + 3600
