@@ -25,6 +25,7 @@
   exponential backoff (60 s doubling up to 300 s) instead of leaving
   control unavailable until a restart. An attempt counts only when it
   yields a connected cloud or FleetAPI connection. (#156)
+- **`PW_LOCAL_FIRST` (opt-in, default `no`)** — with `PW_LOCAL_FIRST=yes`, reserve/mode/grid control writes (HTTP and MQTT) try a confirmed local v1r transport first while its LAN is up and a local connection exists — so the LAN-up / internet-down case keeps working, where local writes are the only path observed to confirm synchronously. Otherwise the write runs unchanged through the normal dispatch (cloud first when configured). Any dispatched local attempt — success, timeout or library error — is final and never followed by a second write, since a timed-out write may still have been applied. Default `no` keeps the historical behavior. Islanding is untouched (always local v1r). (issue #149)
 
 **Fixed:**
 - **History samples survive storage wait timeouts** — Slow SQLite writes no longer lose accepted power, temperature or fan records when polling's five-second wait expires. Accepted writes finish in order, with up to ten seconds to drain on shutdown. Storage status reports pending and rejected writes.
