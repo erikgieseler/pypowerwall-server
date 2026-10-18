@@ -396,6 +396,17 @@ async def test_failover_setting_passed_to_powerwall_constructor(
     assert powerwall_spy.call_args.kwargs.get("failover") is failover
 
 
+@pytest.mark.parametrize("failover", [True, False])
+def test_stats_config_reports_failover(client, monkeypatch, failover):
+    """/stats config reports PW_FAILOVER, as the proxy's /stats does."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "failover", failover)
+    response = client.get("/stats")
+    assert response.status_code == 200
+    assert response.json()["config"]["PW_FAILOVER"] is failover
+
+
 def test_failover_setting_defaults_on_and_parses_no(monkeypatch):
     from app.config import Settings
 

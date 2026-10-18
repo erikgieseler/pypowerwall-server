@@ -94,7 +94,7 @@ docker run -d \
 >
 > **Note:** v1r reaches only the leader Powerwall, so with two or more Powerwalls set `PW_WIFI_HOST` to the gateway's WiFi access point (`192.168.91.1`, or the address that forwards to it, e.g. behind a travel router). Follower Powerwalls are queried over it, and it is the fallback if the wired LAN goes down. It is not set by default: without it the console shows only the leader. The server must be able to reach that address, by joining the gateway's `TeslaPW_` WiFi network or through a static route.
 >
-> **Note:** `PW_FAILOVER=no` pins the configured transports (default `yes`). The v1r leader then stays on the wired LAN instead of switching to `PW_WIFI_HOST`, a failed request returns no data instead of being rerouted, and a local connection never falls back to FleetAPI or Cloud mode. Followers still use `PW_WIFI_HOST`.
+> **Note:** `PW_FAILOVER=no` pins the configured transports (default `yes`). The v1r leader then stays on the wired LAN instead of switching to `PW_WIFI_HOST`, a failed request returns no data instead of being rerouted, and a local connection never falls back to FleetAPI or Cloud mode. Followers still use `PW_WIFI_HOST`. `/stats` reports the setting under `config`.
 >
 > **Note:** The `-v pws-data:/data` mount persists the daily energy, temperature and fan history (SQLite time-series store) across container upgrades. Omit it if you run with `PW_TIMESERIES_RETENTION=-1` (subsystem disabled).
 
