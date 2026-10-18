@@ -19,9 +19,30 @@
   and history. Their display names change to follow the new device, e.g.
   "Default Gateway Battery 1 Capacity" becomes "Powerwall TG… Capacity".
   (#153)
+- **Cloud-control retry with backoff** — when the hybrid cloud-control
+  connection cannot be established at startup (Tesla cloud unreachable,
+  first-setup token exchange failing), the server now retries with
+  exponential backoff (60 s doubling up to 300 s) instead of leaving
+  control unavailable until a restart. An attempt counts only when it
+  yields a connected cloud or FleetAPI connection. (#156)
 
 **Fixed:**
 - **History samples survive storage wait timeouts** — Slow SQLite writes no longer lose accepted power, temperature or fan records when polling's five-second wait expires. Accepted writes finish in order, with up to ten seconds to drain on shutdown. Storage status reports pending and rejected writes.
+- **TEDAPI recovery no longer misses a connection that drifted to cloud
+  reads** — a recovery `connect()` that timed out during a gateway reboot
+  could leave pypowerwall's failover active: the connection stayed on cloud reads
+  (`pw.tedapi` unset, mode "cloud") while the TEDAPI probe skipped it
+  silently, holding a gateway on cloud data for hours after a
+  firmware-update reboot. The probe now runs for every local TEDAPI
+  gateway (PW3 Basic LAN stays exempt — it has no TEDAPI client), counts
+  a connection that left TEDAPI mode as a failed probe with a warning
+  naming the mode, and enters SolarOnly fallback after the usual
+  threshold. Recovery builds a fresh connection the same way startup
+  does and swaps it in only when it comes up in TEDAPI mode and reports
+  a version — the drifted object cannot recover via `connect()`, since
+  pypowerwall restores the configured mode only when every mode fails
+  (jasonacox/pypowerwall#366) — and the existing connection keeps
+  serving until a replacement is verified. (#156)
 - **Docs: v1r follower Powerwalls need `PW_WIFI_HOST`** — the README said `PW_WIFI_HOST` defaults to `192.168.91.1`; it isn't set by default, and without it v1r shows only the leader Powerwall. The README now says to set it to the gateway's WiFi access point for multi-Powerwall sites, and its v1r examples use the wired LAN IP (`10.42.1.x`) for `PW_HOST` instead of the WiFi address. The startup warning names `192.168.91.1` instead of `<gateway-ip>` (#157).
 
 ### [0.10.0] - 2026-10-11
