@@ -4,6 +4,16 @@
 
 ### [0.10.1] - Upcoming
 
+**Added:**
+- **Home Assistant: one device per Powerwall** — each battery's entities
+  (capacity, charge, per-unit temperature and fan sensors) are now grouped
+  under their own HA device named `Powerwall {serial}` and keyed by serial,
+  linked to the gateway device via `via_device`. Entity `unique_id`s and
+  state topics are unchanged, so existing entities keep their entity IDs
+  and history. Their display names change to follow the new device, e.g.
+  "Default Gateway Battery 1 Capacity" becomes "Powerwall TG… Capacity".
+  (#153)
+
 **Fixed:**
 - **Docs: v1r follower Powerwalls need `PW_WIFI_HOST`** — the README said `PW_WIFI_HOST` defaults to `192.168.91.1`; it isn't set by default, and without it v1r shows only the leader Powerwall. The README now says to set it to the gateway's WiFi access point for multi-Powerwall sites, and its v1r examples use the wired LAN IP (`10.42.1.x`) for `PW_HOST` instead of the WiFi address. The startup warning names `192.168.91.1` instead of `<gateway-ip>` (#157).
 
