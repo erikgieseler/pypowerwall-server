@@ -27,6 +27,14 @@
   yields a connected cloud or FleetAPI connection. (#156)
 - **`PW_LOCAL_FIRST` (opt-in, default `no`)** — with `PW_LOCAL_FIRST=yes`, reserve/mode/grid control writes (HTTP and MQTT) try a confirmed local v1r transport first while its LAN is up and a local connection exists — so the LAN-up / internet-down case keeps working, where local writes are the only path observed to confirm synchronously. Otherwise the write runs unchanged through the normal dispatch (cloud first when configured). Any dispatched local attempt — success, timeout or library error — is final and never followed by a second write, since a timed-out write may still have been applied. Default `no` keeps the historical behavior. Islanding is untouched (always local v1r). (issue #149)
 
+**Docs:**
+- **API reference (`API.md`)** — one reference for every environment variable,
+  config file field and route: defaults, the connection modes each setting
+  applies to, proxy-compatible names, auth requirements, the control write path
+  and islanding, and safe-default behavior. It also lists the proxy variables
+  the server accepts but ignores. A test fails when a setting or route is added
+  without an API.md entry. The README's endpoint list now points to it.
+
 **Fixed:**
 - **History samples survive storage wait timeouts** — Slow SQLite writes no longer lose accepted power, temperature or fan records when polling's five-second wait expires. Accepted writes finish in order, with up to ten seconds to drain on shutdown. Storage status reports pending and rejected writes.
 - **TEDAPI recovery no longer misses a connection that drifted to cloud
