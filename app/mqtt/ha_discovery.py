@@ -301,7 +301,6 @@ def _device_block(gateway_id: str, gateway_name: str, version: Optional[str]) ->
 
 def _unit_device_block(
     gateway_id: str,
-    gateway_name: str,
     serial: str,
     version: Optional[str],
 ) -> dict:
@@ -965,7 +964,7 @@ def build_discovery_payloads(
         i = batt["index"]
         b_prefix = f"{data_prefix}/batteries/{i}"
         unit_device = (
-            _unit_device_block(gateway_id, gateway_name, batt["serial"], version)
+            _unit_device_block(gateway_id, batt["serial"], version)
             if batt.get("serial")
             else None
         )
@@ -999,9 +998,7 @@ def build_discovery_payloads(
         devices_prefix = f"{data_prefix}/devices"
         for serial, signals in device_signals.items():
             serial_slug = _serial_slug(serial)
-            unit_device = _unit_device_block(
-                gateway_id, gateway_name, serial, version
-            )
+            unit_device = _unit_device_block(gateway_id, serial, version)
             for metric_id, value in signals.items():
                 entry = DEVICE_METRIC_TOPICS.get(metric_id)
                 if entry is None or metric_id not in SIGNAL_METRICS:
