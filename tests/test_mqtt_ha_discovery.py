@@ -383,18 +383,24 @@ class TestBuildDiscoveryPayloads:
         # serial-keyed identifier, linked to the gateway device
         assert dev["identifiers"] == ["pypowerwall_home_tg1234567890ab"]
         assert dev["via_device"] == "pypowerwall_home"
-        assert dev["name"] == "Home TG1234567890AB"
+        assert dev["name"] == "Powerwall TG1234567890AB"
+        assert dev["serial_number"] == "TG1234567890AB"
         # unique_id and state topic unchanged from #150 (history preserved)
         assert b1["unique_id"] == "pypowerwall_home_battery_1_capacity"
         assert b1["state_topic"] == "pypowerwall/home/batteries/1/capacity"
+        # entity name relative to the unit device (HA prefixes device name)
+        assert b1["name"] == "Capacity"
 
         # both entities of the same battery share one device block
         b1c = payloads["homeassistant/sensor/pypowerwall_home_battery_1_charge/config"]
         assert b1c["device"] == dev
+        assert b1c["name"] == "Charge"
 
-        # unknown serial falls back to the shared gateway device
+        # unknown serial falls back to the shared gateway device and keeps
+        # the gateway-relative name (device name is the gateway's)
         b2 = payloads["homeassistant/sensor/pypowerwall_home_battery_2_capacity/config"]
         assert b2["device"]["identifiers"] == ["pypowerwall_home"]
+        assert b2["name"] == "Battery 2 Capacity"
 
     def test_battery_serial_joins_discovery_signature(self):
         """A serial appearing on a later poll must re-trigger discovery."""
@@ -1174,9 +1180,11 @@ class TestDeviceSignalSensors:
             == "pypowerwall/home/devices/TG2312H0001/temperature/pack_max"
         )
         assert p["entity_category"] == "diagnostic"
-        assert "TG2312H0001" in p["name"]
-        # Label vocabulary comes from SIGNAL_METRICS, not a local copy
-        assert "Pack temp (max)" in p["name"]
+        # name is the signal label alone, relative to the unit device
+        # (HA builds friendly name as device name + entity name)
+        assert p["name"] == "Pack temp (max)"
+        assert p["device"]["name"] == "Powerwall TG2312H0001"
+        assert p["device"]["serial_number"] == "TG2312H0001"
 
         fan = payloads[
             "homeassistant/sensor/pypowerwall_home_device_tg2312h0001_fan_a_rpm/config"

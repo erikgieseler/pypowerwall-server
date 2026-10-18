@@ -94,8 +94,8 @@ Site-wide sensors share the single "Powerwall" gateway device block so HA
 groups them together.  Per-unit entities (per-battery capacity/charge from
 #150, per-unit temperature/fan signals) are grouped under one device per
 physical Powerwall, keyed by unit serial and linked to the gateway device
-via via_device (#153) - unique_ids are unchanged, so HA re-parents entities
-and keeps their history.
+via via_device (#153) - unique_ids and state topics are unchanged, so
+existing entities keep their entity IDs and history.
 The device model is set from PowerwallData.version when available, otherwise
 "Powerwall".
 
@@ -310,15 +310,19 @@ def _unit_device_block(
     Each unit device is keyed by its serial (never its position, which
     shifts when blocks are added/removed), links to the gateway device via
     via_device, and reuses _serial_slug() so the identifier matches the
-    slugs already used in per-unit entity unique_ids.  When a battery
-    block's PackageSerialNumber differs from the vitals serial for the
-    same physical unit, each serial keys its own device rather than
-    silently merging - flagged for live verification on 2x PW3 (#153).
+    slugs already used in per-unit entity unique_ids.  Verified on our
+    live 2x PW3 gateway (#154 hardware test): each battery block's
+    PackageSerialNumber matches that unit's vitals serial, so
+    capacity/charge entities and temperature/fan signals land on the same
+    unit device.  The device name is "Powerwall {serial}" and entity
+    names on a unit device are relative to it, because Home Assistant
+    builds an MQTT entity's friendly name as device name + entity name.
     """
     slug = _serial_slug(serial)
     return {
         "identifiers": [f"pypowerwall_{gateway_id}_{slug}"],
-        "name": f"{gateway_name} {serial}",
+        "name": f"Powerwall {serial}",
+        "serial_number": serial,
         "manufacturer": "Tesla",
         "model": "Powerwall",
         "sw_version": version or "unknown",
@@ -954,8 +958,9 @@ def build_discovery_payloads(
 
     # --- Per-battery capacity sensors (degradation tracking) ---
     # unique_ids and state topics are unchanged from #150; only the device
-    # block moves (to the battery's own unit device when its serial is
-    # known), so Home Assistant re-parents the entity and keeps its history.
+    # block and entity names move (to the battery's own unit device when
+    # its serial is known), so existing entities keep their entity IDs
+    # and history.
     for batt in batteries or []:
         i = batt["index"]
         b_prefix = f"{data_prefix}/batteries/{i}"
@@ -964,10 +969,12 @@ def build_discovery_payloads(
             if batt.get("serial")
             else None
         )
+        # Entity names on a unit device are relative to the device name
+        # ("Powerwall {serial}"), since HA prefixes the device name.
         if batt.get("capacity") is not None:
             results.append(sensor(
                 f"battery_{i}_capacity",
-                f"Battery {i} Capacity",
+                "Capacity" if unit_device else f"Battery {i} Capacity",
                 f"{b_prefix}/capacity",
                 unit="Wh",
                 device_class="energy_storage",
@@ -978,7 +985,7 @@ def build_discovery_payloads(
         if batt.get("charge") is not None:
             results.append(sensor(
                 f"battery_{i}_charge",
-                f"Battery {i} Charge",
+                "Charge" if unit_device else f"Battery {i} Charge",
                 f"{b_prefix}/charge",
                 unit="Wh",
                 device_class="energy_storage",
@@ -1004,7 +1011,7 @@ def build_discovery_payloads(
                 results.append(
                     sensor(
                         f"device_{serial_slug}_{metric_id}",
-                        f"Powerwall {serial} {SIGNAL_METRICS[metric_id]['label']}",
+                        SIGNAL_METRICS[metric_id]["label"],
                         f"{devices_prefix}/{serial}/{topic_suffix}",
                         unit=unit,
                         device_class="temperature" if unit == "°C" else None,
