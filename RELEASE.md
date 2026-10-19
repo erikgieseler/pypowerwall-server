@@ -35,6 +35,28 @@
   reports the setting under `config`.
 
 **Fixed:**
+- **The Console and `/stats` show the connection in use** — pypowerwall's
+  failover can move a connection off its configured mode (FleetAPI to Cloud,
+  local to Cloud), but the Console and `/stats` (`mode`, `fleetapi`,
+  `cloudmode`, `tedapi`, `basiclan`) kept reporting the configuration. They
+  now report the live connection, recorded on every poll; `/api/gateways/`
+  has it as `data.connection_mode`. Before the first poll they show the
+  configuration.
+- **FleetAPI works with the single-gateway settings**, as in the proxy: with
+  no `PW_HOST`, `.pypowerwall.fleetapi` in `PW_AUTH_PATH` selects FleetAPI
+  (before Cloud), and `.pypowerwall.auth` selects Cloud, supplying the email
+  when `PW_EMAIL` is empty. FleetAPI used to need a `PW_GATEWAYS` entry; a
+  proxy-style FleetAPI setup tried the owner Cloud API and never connected.
+- **Powerwall 2 local mode gets the full local API** — `PW_HOST` +
+  `PW_PASSWORD` without a gateway password was always treated as Powerwall 3
+  Basic LAN, which skipped vitals, alerts, status, firmware, site name,
+  mode, reserve and system status (so `/pod` lost pack energy and reserve).
+  The server now tells them apart on connect: a gateway that answers
+  `/api/status` is polled in full, like the proxy's local mode; one that
+  doesn't is Basic LAN as before, re-checked every 5 minutes so a Powerwall 2
+  whose status request failed once still gets full polling. The TEDAPI probe runs only for gateways
+  configured for TEDAPI, and `/stats` reports `tedapi: false` for local and
+  Basic LAN gateways.
 - **A proxy `pypowerwall.env` no longer stops the server from starting** —
   boolean and integer settings that the proxy took now parse instead of
   failing startup with a validation error: an empty value (`PW_DEBUG=`,

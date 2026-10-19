@@ -186,6 +186,24 @@ class IslandingCooldownError(RuntimeError):
         self.retry_after = retry_after
 
 
+def _connection_mode_label(pw, basic_lan: bool) -> Optional[str]:
+    """The connection pypowerwall is using now, which failover can change
+    (FleetAPI -> Cloud, local -> Cloud); None when the client doesn't say."""
+    mode = getattr(pw, "mode", None)
+    if mode == "fleetapi":
+        return "FleetAPI"
+    if mode == "cloud":
+        return "Cloud"
+    if mode == "local":
+        tedapi_mode = getattr(pw, "tedapi_mode", None)
+        if tedapi_mode == "v1r":
+            return "TEDAPI v1r"
+        if tedapi_mode in ("full", "hybrid"):
+            return "TEDAPI"
+        return "Basic LAN" if basic_lan else "Local"
+    return None
+
+
 class GatewayManager:
     """Manages multiple Powerwall gateway connections."""
 
@@ -206,6 +224,9 @@ class GatewayManager:
     # this often, and retry a failed fetch no sooner than _SITE_INFO_RETRY
     _SITE_INFO_REFRESH = 300
     _SITE_INFO_RETRY = 60
+    # Basic LAN detected on connect is provisional: re-check /api/status this
+    # often so a Powerwall 2 whose status probe failed once gets full polling
+    _BASIC_LAN_RECHECK = 300
 
     def __init__(self):
         self.gateways: Dict[str, Gateway] = {}
@@ -282,6 +303,8 @@ class GatewayManager:
         # Last good /api/site_info per gateway, and (monotonic time, succeeded) of the last fetch
         self._site_info: Dict[str, Dict[str, Any]] = {}
         self._site_info_attempt: Dict[str, Tuple[float, bool]] = {}
+        # Monotonic time of the last /api/status check per Basic LAN gateway
+        self._basic_lan_checked: Dict[str, float] = {}
 
         # Cloud connection for control operations (set_reserve, set_mode).
         # TEDAPI doesn't support POST/write APIs, so a separate cloud-mode
@@ -476,8 +499,9 @@ class GatewayManager:
             try:
                 # Validate configuration
                 # TEDAPI mode: need host + (gw_pwd OR rsa_key_path)
-                # Basic LAN mode (PW3): host + password only - pypowerwall's
-                #   local client serves core metrics via /api/login/Basic
+                # host + password only: the local API. A Powerwall 2 serves the
+                #   full local API; a Powerwall 3 on its wired LAN serves only
+                #   core metrics (Basic LAN). Which one is decided on connect.
                 # Cloud mode: need email (authpath is optional, pypowerwall has defaults)
                 basic_lan = bool(
                     config.host
@@ -490,7 +514,8 @@ class GatewayManager:
                     or config.password
                     or settings.pw_password
                 )
-                has_cloud = config.email  # cloud_mode is auto-set, email is sufficient
+                # cloud_mode is auto-set; email (Cloud) or fleetapi is sufficient
+                has_cloud = config.email or config.fleetapi
 
                 if not (has_local or has_cloud):
                     logger.error(
@@ -515,8 +540,8 @@ class GatewayManager:
                         config.id,
                     )
 
-                # Auto-enable cloud_mode if email is set but no host
-                if config.email and not config.host:
+                # Auto-enable cloud_mode if email (or FleetAPI) is set but no host
+                if (config.email or config.fleetapi) and not config.host:
                     config.cloud_mode = True
 
                 gateway = Gateway(
@@ -558,7 +583,7 @@ class GatewayManager:
                 elif config.cloud_mode:
                     mode = "Cloud"
                 elif basic_lan:
-                    mode = "Basic LAN"
+                    mode = "Local or Basic LAN (detected on connect)"
                 else:
                     mode = "TEDAPI"
 
@@ -623,7 +648,12 @@ class GatewayManager:
         # mode and recovers with a fresh connection on a backoff.
         if settings.tedapi_recovery:
             for gateway_id, gw in self.gateways.items():
-                if gw.host and not gw.cloud_mode and not gw.fleetapi:
+                if (
+                    gw.host
+                    and not gw.cloud_mode
+                    and not gw.fleetapi
+                    and (gw.gw_pwd or gw.rsa_key_configured)
+                ):
                     self._fallback_state[gateway_id] = self._new_fallback_state()
                     self._tedapi_probe_failures[gateway_id] = 0
                     self._probe_tasks[gateway_id] = asyncio.create_task(
@@ -890,6 +920,27 @@ class GatewayManager:
         # Run blocking pypowerwall calls in dedicated executor with timeout protection
         loop = asyncio.get_running_loop()
 
+        # Basic LAN is decided on connect from a failed /api/status, which a
+        # Powerwall 2 can also hit transiently. Re-check now and then: once
+        # the gateway answers, it gets the full local API from then on.
+        now = time.monotonic()
+        checked = self._basic_lan_checked.setdefault(gateway_id, now)  # clock starts at the first poll
+        if basic_lan and now - checked >= self._BASIC_LAN_RECHECK:
+            self._basic_lan_checked[gateway_id] = now
+            try:
+                full_api = await asyncio.wait_for(
+                    loop.run_in_executor(self._executor, pw.is_connected),
+                    timeout=step_timeout,
+                )
+            except (asyncio.TimeoutError, Exception):
+                full_api = False
+            if full_api is True:
+                gateway.basic_lan = basic_lan = False
+                logger.info(
+                    f"Gateway {gateway_id} now answers /api/status: polling the "
+                    "full local API (not Basic LAN)"
+                )
+
         # Fetch core data - aggregates is required, vitals/strings are optional
         # Use asyncio.wait_for to timeout if pypowerwall hangs
         try:
@@ -1044,6 +1095,8 @@ class GatewayManager:
                     logger.debug(f"Site info not available for {gateway_id}: {e}")
                 self._site_info_attempt[gateway_id] = (time.monotonic(), ok)
             data.site_info = self._site_info.get(gateway_id)
+
+        data.connection_mode = _connection_mode_label(pw, basic_lan)
 
         # Cache tedapi_mode and the transport pw3 flag; pw3 itself is
         # resolved from the hardware after tedapi_config is fetched below.
@@ -1389,15 +1442,16 @@ class GatewayManager:
                     # takes longer re-fetches mid-cycle data it already has.
                     pwcacheexpire = max(5, int(self._poll_interval))
 
-                    if config.cloud_mode and config.email:
+                    if config.cloud_mode and (config.email or config.fleetapi):
                         cloud_kwargs = {
-                            "email": config.email,
                             "cloudmode": True,
                             "fleetapi": config.fleetapi,
                             "timezone": config.timezone,
                             "pwcacheexpire": pwcacheexpire,
                             "failover": settings.failover,
                         }
+                        if config.email:
+                            cloud_kwargs["email"] = config.email
                         if config.authpath:
                             cloud_kwargs["authpath"] = config.authpath
                         if settings.siteid:
@@ -1431,19 +1485,30 @@ class GatewayManager:
                             loop.run_in_executor(self._executor, pw.is_connected),
                             timeout=10.0,
                         )
-                        if not connected and self.gateways[gateway_id].basic_lan:
-                            # PW3 Basic LAN does not expose /api/status, so
-                            # pypowerwall's is_connected() (which probes that
-                            # endpoint) reports a false negative even though
-                            # the Basic LAN endpoints are reachable. Probe an
-                            # endpoint this mode does serve instead.
-                            grid_probe = await asyncio.wait_for(
-                                loop.run_in_executor(self._executor, pw.grid_status),
-                                timeout=10.0,
-                            )
-                            connected = grid_probe is not None
+                        password_only = bool(
+                            config.host
+                            and (config.password or settings.pw_password)
+                            and not (config.gw_pwd or config.rsa_key_path)
+                        )
+                        if password_only:
+                            # A Powerwall 2 answers /api/status (what
+                            # is_connected() probes) and serves the full local
+                            # API, like the proxy's local mode. PW3 Basic LAN
+                            # doesn't expose /api/status, so is_connected()
+                            # reports a false negative there; probe an
+                            # endpoint that mode does serve and limit polling
+                            # to it.
+                            basic_lan = not connected
+                            if basic_lan:
+                                grid_probe = await asyncio.wait_for(
+                                    loop.run_in_executor(self._executor, pw.grid_status),
+                                    timeout=10.0,
+                                )
+                                connected = grid_probe is not None
+                            if connected:
+                                self.gateways[gateway_id].basic_lan = basic_lan
                         if not connected:
-                            mode_hint = "Basic LAN" if self.gateways[gateway_id].basic_lan else "TEDAPI mode"
+                            mode_hint = "local API" if password_only else "TEDAPI mode"
                             raise Exception(
                                 f"pypowerwall failed to connect to gateway {gateway_id} ({mode_hint})"
                             )
@@ -1466,7 +1531,7 @@ class GatewayManager:
                     elif gateway.basic_lan:
                         mode_label = "Basic LAN"
                     else:
-                        mode_label = "TEDAPI WiFi"
+                        mode_label = "Local"
 
                     if gateway.cloud_mode or gateway.fleetapi:
                         try:
