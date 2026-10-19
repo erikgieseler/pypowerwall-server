@@ -82,7 +82,7 @@ Environment Variables (Proxy Compatible):
         PW_ISLANDING_COOLDOWN - Seconds between islanding commands per gateway
                                (default: 30; 0 disables)
         PW_LOCAL_FIRST       - Prefer local v1r writes "yes"/"no" (default: "no")
-        PW_NEG_SOLAR         - Allow negative solar values "yes"/"no" (default: "no")
+        PW_NEG_SOLAR         - Allow negative solar values "yes"/"no" (default: "yes")
         PW_RSA_KEY_PATH      - Path to RSA-4096 private key PEM for TEDAPI v1r LAN access (default: none)
         PW_WIFI_HOST         - WiFi host IP for TEDAPI v1r WiFi fallback (default: none)
         PW_FAILOVER          - Transport/mode failover "yes"/"no" (default: "yes")
@@ -375,8 +375,8 @@ class Settings(BaseSettings):
         default=True, alias="PW_FAILOVER"
     )  # pypowerwall failover; false pins the configured transports
     neg_solar: bool = Field(
-        default=False, alias="PW_NEG_SOLAR"
-    )  # Allow negative solar values (default: no)
+        default=True, alias="PW_NEG_SOLAR"
+    )  # Allow negative solar values (default: yes, as in the proxy)
 
     # CORS configuration
     cors_origins: List[str] = Field(default=["*"], alias="CORS_ORIGINS")
