@@ -49,7 +49,8 @@ Error Handling:
 
 Thread Safety:
     - All operations use asyncio (no threads/locks needed for reads)
-    - Write operations serialized via _write_lock to prevent set_operation() races
+    - Write operations serialized via _write_lock (held until the library call
+      finishes, even past a timeout) to prevent set_operation() races
     - Single event loop handles all concurrency
     - Background task coordinated via asyncio.create_task()
     - Graceful shutdown via task cancellation
@@ -67,7 +68,7 @@ import math
 import os
 import time
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
@@ -76,6 +77,7 @@ from pypowerwall.tedapi import GW_IP as TEDAPI_GW_IP
 from app.models.gateway import Gateway, GatewayStatus, PowerwallData, AggregateData
 from app.core.scaling import raw_to_tesla_battery_percent
 from app.config import GatewayConfig
+from app.utils.control import is_v1r_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -107,13 +109,6 @@ _WRITE_METHODS = frozenset(
 
 
 _ISLANDING_METHODS = frozenset({"go_off_grid", "reconnect_grid"})
-# Writes whose library call keeps running after our timeout and must not
-# overlap the next write: the write lock is held until the call finishes.
-# (max_backup scheduling is a cancel plus a schedule, two v1r round trips.)
-_HOLD_LOCK_UNTIL_DONE = _ISLANDING_METHODS | {
-    "schedule_max_backup",
-    "cancel_max_backup",
-}
 # Reads that take the write lock: the backup-events read must wait for a
 # timed-out schedule or cancel that is still running, or a cleanup could
 # decide on stale events and cancel the event that just got scheduled.
@@ -1713,10 +1708,10 @@ class GatewayManager:
                 gateway=gateway, data=data, online=True, last_updated=data.timestamp
             )
 
-            # Persist the sample for daily energy statistics (never raises;
-            # no-op when the store is disabled).
-            await self._record_timeseries_sample(gateway_id, gateway, data)
-            await self._record_signal_sample(gateway_id, gateway, data)
+            # Queue the sample for daily energy statistics (never raises or
+            # waits; no-op when the store is disabled).
+            self._record_timeseries_sample(gateway_id, gateway, data)
+            self._record_signal_sample(gateway_id, gateway, data)
 
             # Publish to MQTT after the cache is updated (never raises here).
             self._schedule_mqtt_publish(gateway_id)
@@ -1767,17 +1762,16 @@ class GatewayManager:
             # Publish the offline status to MQTT so HA reflects gateway going offline.
             self._schedule_mqtt_publish(gateway_id)
 
-    async def _record_timeseries_sample(
+    def _record_timeseries_sample(
         self, gateway_id: str, gateway, data: PowerwallData
     ) -> None:
-        """Feed one poll result into the TimeSeriesStore.
+        """Queue one poll result for the TimeSeriesStore.
 
-        Runs after the cache update on every successful poll cycle. Storage
-        failures are logged and swallowed — statistics must never break
-        polling. Samples are awaited (not fire-and-forget) so each gateway's
-        samples stay strictly ordered for trapezoidal integration. The
-        timeout bounds how long polling waits; the store retains accepted
-        writes and shields them from cancellation until they finish.
+        Runs after the cache update on every successful poll cycle and never
+        waits for the write: a stalled disk must not hold up polling or MQTT
+        (DESIGN.md §6). The store runs writes in FIFO order, so each
+        gateway's samples stay ordered for trapezoidal integration, bounds
+        its backlog, and logs storage failures.
         """
         try:
             aggregates = data.aggregates or {}
@@ -1792,39 +1786,29 @@ class GatewayManager:
                 ts = datetime.now().timestamp()
             from app.core.timeseries import get_timeseries_store
 
-            await asyncio.wait_for(
-                get_timeseries_store().record_sample(
-                    gateway_id=gateway_id,
-                    ts=ts,
-                    solar_w=solar,
-                    home_w=load,
-                    battery_w=battery,
-                    site_w=site,
-                    soe=data.soe,
-                    timezone=gateway.timezone,
-                ),
-                timeout=5.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Time-series sample write timed out for %s — "
-                "accepted write remains queued; polling continues",
-                gateway_id,
+            get_timeseries_store().submit_sample(
+                gateway_id=gateway_id,
+                ts=ts,
+                solar_w=solar,
+                home_w=load,
+                battery_w=battery,
+                site_w=site,
+                soe=data.soe,
+                timezone=gateway.timezone,
             )
         except Exception as e:
             logger.debug(f"Time-series sample recording failed for {gateway_id}: {e}")
 
-    async def _record_signal_sample(
+    def _record_signal_sample(
         self, gateway_id: str, gateway: Gateway, data: PowerwallData
     ) -> None:
-        """Feed this poll's Powerwall temperatures and fan readings into the
+        """Queue this poll's Powerwall temperatures and fan readings for the
         TimeSeriesStore.
 
         Signals come from the vitals and fan_speeds already fetched this
         cycle (no extra gateway calls). The store keeps at most one snapshot
-        per PW_TIMESERIES_SIGNAL_INTERVAL, so most calls return immediately.
-        Like power samples, failures are logged and swallowed. The timeout
-        bounds the polling wait without cancelling accepted store writes.
+        per PW_TIMESERIES_SIGNAL_INTERVAL, so most calls queue nothing. Like
+        power samples, the write isn't awaited and failures are logged.
 
         Args:
             gateway_id: Gateway identifier.
@@ -1849,17 +1833,8 @@ class GatewayManager:
             ts = data.timestamp
             if ts is None or ts < 1e9:
                 ts = datetime.now().timestamp()
-            await asyncio.wait_for(
-                store.record_signal_sample(
-                    gateway_id, ts, metrics, timezone=gateway.timezone
-                ),
-                timeout=5.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Device signal write timed out for %s — "
-                "accepted write remains queued; polling continues",
-                gateway_id,
+            store.submit_signal_sample(
+                gateway_id, ts, metrics, timezone=gateway.timezone
             )
         except Exception as e:
             logger.debug(f"Device signal recording failed for {gateway_id}: {e}")
@@ -2060,15 +2035,17 @@ class GatewayManager:
         connect(), #155) counts as a failed probe instead of skipping
         silently.  Recovery builds a fresh connection the same way startup
         does (_create_local_connection) and swaps it in only if it comes up
-        in TEDAPI mode and reports a version; the existing connection keeps
-        serving until then.  connect() on the drifted object would resume
-        from cloud mode — the library restores the configured mode only
-        when every mode fails (#366 in pypowerwall), so it can't recover.
+        in TEDAPI mode and reports a version, so the existing connection
+        keeps serving until a verified replacement exists (reconnecting the
+        drifted object in place would leave nothing serving meanwhile).  The
+        replaced connection is dropped, not closed: the local client's
+        close_session() logs its token out at the gateway, and the fresh
+        connection reuses that token from the shared auth cache file.
 
-        Hybrid-mode note: a hybrid connection (v1r + WiFi fallback) has
-        pw.tedapi set, so its probes run against the local API; a WiFi
-        TEDAPI outage might not be detected.  Monitoring is best-effort for
-        hybrid; pure TEDAPI mode gets full coverage.
+        v1r + WiFi note: that connection has pw.tedapi set, so its probes
+        run against the wired LAN; a WiFi TEDAPI outage might not be
+        detected.  Monitoring is best-effort there; TEDAPI over WiFi alone
+        gets full coverage.
         """
         from app.config import settings
 
@@ -2164,11 +2141,9 @@ class GatewayManager:
                         if config is None:
                             raise RuntimeError("no stored configuration")
                         # Fresh connection, built the same way the lazy init
-                        # builds the first one.  connect() on the drifted
-                        # object would resume from cloud mode and cannot
-                        # recover (#155).  Swap it in only if it comes up in
-                        # TEDAPI mode and reports a version, so the current
-                        # connection keeps serving otherwise.
+                        # builds the first one.  Swap it in only if it comes
+                        # up in TEDAPI mode and reports a version, so the
+                        # current connection keeps serving otherwise.
                         fresh_pw = await self._create_local_connection(config)
                         verify_version = None
                         if getattr(fresh_pw, "tedapi", None):
@@ -2324,6 +2299,47 @@ class GatewayManager:
         """Get pypowerwall connection for a gateway."""
         return self.connections.get(gateway_id)
 
+    async def _locked_call(
+        self,
+        func: Callable[[], Any],
+        timeout: float,
+        on_dispatch: Optional[Callable[[asyncio.Future], None]] = None,
+    ) -> Any:
+        """Run a write (or a locked read) in the executor under _write_lock.
+
+        The lock is released when the library call finishes, not when we stop
+        waiting: after a timeout, or a cancelled request, the call keeps
+        running in its worker thread, and the next write must not overlap it
+        (two writes to the same site would race). ``timeout`` covers waiting
+        for the lock, for a free worker and for the call: a write whose time
+        runs out before its worker starts it raises asyncio.TimeoutError and
+        never reaches the site after its caller gave up. ``on_dispatch`` sees
+        the future right after submission (islanding's cooldown bookkeeping).
+        """
+        deadline = time.monotonic() + timeout
+
+        def run_if_in_time():
+            # The shared executor may be busy with reads: check again when
+            # a worker picks the call up
+            if time.monotonic() >= deadline:
+                raise asyncio.TimeoutError("expired before a worker started it")
+            return func()
+
+        await asyncio.wait_for(self._write_lock.acquire(), timeout=timeout)
+        try:
+            future = asyncio.get_running_loop().run_in_executor(
+                self._executor, run_if_in_time
+            )
+        except BaseException:
+            self._write_lock.release()
+            raise
+        future.add_done_callback(lambda _done: self._write_lock.release())
+        if on_dispatch is not None:
+            on_dispatch(future)
+        return await asyncio.wait_for(
+            asyncio.shield(future), timeout=deadline - time.monotonic()
+        )
+
     async def call_api(
         self,
         gateway_id: str,
@@ -2381,13 +2397,9 @@ class GatewayManager:
                 f"[{gateway_id}] call_api({method}) starting (timeout={timeout}s)"
             )
             if method in _WRITE_METHODS:
-                async with self._write_lock:
-                    result = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            self._executor, lambda: method_func(*args, **kwargs)
-                        ),
-                        timeout=timeout,
-                    )
+                result = await self._locked_call(
+                    lambda: method_func(*args, **kwargs), timeout
+                )
             else:
                 result = await asyncio.wait_for(
                     loop.run_in_executor(
@@ -2479,13 +2491,9 @@ class GatewayManager:
             method_func = getattr(self._cloud_control, method)
             loop = asyncio.get_running_loop()
             if method in _WRITE_METHODS:
-                async with self._write_lock:
-                    result = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            self._executor, lambda: method_func(*args, **kwargs)
-                        ),
-                        timeout=timeout,
-                    )
+                result = await self._locked_call(
+                    lambda: method_func(*args, **kwargs), timeout
+                )
             else:
                 result = await asyncio.wait_for(
                     loop.run_in_executor(
@@ -2588,14 +2596,10 @@ class GatewayManager:
             method_func = getattr(pw, method)
             loop = asyncio.get_running_loop()
             if method in _WRITE_METHODS or method in _LOCKED_READS:
-                lock = self._write_lock
-                await lock.acquire()
-                release_lock = True
-                try:
-                    future = loop.run_in_executor(
-                        self._executor, lambda: method_func(*args, **kwargs)
-                    )
-                    if method in _ISLANDING_METHODS:
+                on_dispatch = None
+                if method in _ISLANDING_METHODS:
+
+                    def on_dispatch(future):
                         # Cooldown clock starts at dispatch — a failed or
                         # timed-out contactor command still counts, because
                         # the gateway may have acted on it.
@@ -2610,22 +2614,10 @@ class GatewayManager:
                                 self._islanding_futures.pop(gateway_id, None)
 
                         future.add_done_callback(clear_after_completion)
-                    try:
-                        result = await asyncio.wait_for(
-                            asyncio.shield(future), timeout=timeout
-                        )
-                    except asyncio.TimeoutError:
-                        if method in _HOLD_LOCK_UNTIL_DONE:
-                            release_lock = False
 
-                            def release_after_completion(_completed_future):
-                                lock.release()
-
-                            future.add_done_callback(release_after_completion)
-                        raise
-                finally:
-                    if release_lock:
-                        lock.release()
+                result = await self._locked_call(
+                    lambda: method_func(*args, **kwargs), timeout, on_dispatch
+                )
             else:
                 result = await asyncio.wait_for(
                     loop.run_in_executor(
@@ -2666,8 +2658,6 @@ class GatewayManager:
         start, cloud failover) is not v1r.
         """
         try:
-            from app.mqtt.ha_discovery import is_v1r_gateway
-
             status = self.get_gateway(gateway_id)
             return is_v1r_gateway(
                 self.gateways.get(gateway_id),
@@ -2726,9 +2716,14 @@ class GatewayManager:
 
         if not settings.local_first or not self._is_confirmed_v1r(gateway_id):
             return None, None
+        status = self.cache.get(gateway_id)
         if (
             self._is_lan_failed(gateway_id)
             or self.connections.get(gateway_id) is None
+            # lan_failed only trips with a WiFi host and failover on; a
+            # failed last poll covers a dead LAN without them (cached state)
+            or status is None
+            or not status.online
         ):
             # Nothing dispatchable locally (local v1r writes are LAN-only):
             # decline and let the caller's historical dispatch run unchanged.
