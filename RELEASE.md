@@ -4,6 +4,23 @@
 
 ### [0.12.0] - Upcoming
 
+**Added:**
+- **The proxy's control API** — `GET /control/reserve`, `/control/mode`,
+  `/control/grid_charging`, `/control/grid_export` and `/control/max_backup`
+  read the current settings without a token, and `POST /control/<name>`
+  takes the proxy's form-encoded `value=...&token=...` (plus the `mode` and
+  `level` companions; an empty `value` reads), with the proxy's
+  `{"error": ...}` / `{"unauthorized": ...}` responses. Clients written for
+  the proxy, such as Powerwall-Dashboard's `tools/switch-mode`, work
+  unchanged. The JSON API takes the same bodies as before; a body that isn't a
+  JSON object still gets FastAPI's `422`. (jasonacox/Powerwall-Dashboard#878)
+- **Max backup (storm watch) control** — `POST /control/max_backup` with a
+  duration (60 to 4294967295 seconds) or `cancel` schedules or cancels a manual
+  backup event,
+  and `GET /control/max_backup` lists backup events (cached 30 seconds), as
+  in the proxy. Needs the TEDAPI v1r transport. All max_backup operations are
+  serialized, and the writes share the gateway write lock.
+
 **Changed:**
 - **Behavior change: with no `PW_HOST`, a `.pypowerwall.fleetapi` file in
   `PW_AUTH_PATH` selects FleetAPI**, as the proxy does, even when `PW_EMAIL`
