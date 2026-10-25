@@ -356,9 +356,10 @@ class GatewayManager:
         # alongside a TEDAPI gateway. This enables hybrid operation:
         # TEDAPI for fast local reads, cloud for control writes.
         self._cloud_control: Optional[pypowerwall.Powerwall] = None
-        # Gateway the shared cloud connection writes for, set only when its
+        # Gateway the shared cloud connection is bound to, set only when its
         # Tesla site is unambiguous (see _cloud_site_unambiguous). MQTT
-        # controls use the shared connection for this gateway and no other.
+        # controls and the cloud read fallback use the shared connection for
+        # this gateway and no other.
         self._cloud_control_gateway_id: Optional[str] = None
         # Opt-in cloud read fallback state and the lock that serializes its
         # full cloud reads. Cloud writes keep their existing finality path.
@@ -815,7 +816,7 @@ class GatewayManager:
                     if await self._cloud_site_unambiguous(config.fleetapi):
                         self._cloud_control_gateway_id = config.id
                     logger.info(
-                        "Cloud control connection established for write operations"
+                        "Cloud connection established (control/read bindings available)"
                     )
                     return  # Only need one cloud control connection
                 except Exception as e:
@@ -838,12 +839,15 @@ class GatewayManager:
         setup (the site file in the auth path), the connection is FleetAPI
         (its site comes from its own setup), or the account has one site.
         Otherwise the cloud client defaults to the account's first site,
-        which may not be this gateway's, so MQTT controls don't use it.
-        Only MQTT controls use the binding, so without them nothing is checked.
+        which may not be this gateway's, so the binding is unsafe.
+
+        The binding is needed by MQTT controls and by the opt-in cloud read
+        fallback. When neither can use it, skip the check entirely.
         """
         from app.config import settings
 
-        if not settings.mqtt_controls_available:
+        read_fallback = settings.cloud_read_fallback and settings.failover
+        if not settings.mqtt_controls_available and not read_fallback:
             return False
         client = getattr(self._cloud_control, "client", None)
         sitefile = getattr(client, "sitefile", None)
@@ -863,8 +867,8 @@ class GatewayManager:
             return True
         logger.warning(
             "Hybrid cloud connection: the Tesla account has %s sites and no "
-            "site is selected, so MQTT controls won't use it. Set PW_SITEID "
-            "to this gateway's energy site id.",
+            "site is selected, so MQTT controls and the cloud read fallback "
+            "won't use it. Set PW_SITEID to this gateway's energy site id.",
             len(sites) if isinstance(sites, list) else "an unknown number of",
         )
         return False

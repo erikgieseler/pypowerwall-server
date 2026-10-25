@@ -241,6 +241,53 @@ async def test_health_reports_degraded_for_cloud_fallback(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cloud_read_fallback_binds_cloud_without_mqtt(
+    monkeypatch, tmp_path
+):
+    """The fallback needs a site-bound cloud link even without MQTT controls."""
+    import types
+    import sys
+
+    from app.config import GatewayConfig
+
+    gm = GatewayManager()
+    site = tmp_path / ".pypowerwall.site"
+    site.write_text("123")
+    cloud = types.SimpleNamespace(
+        client=types.SimpleNamespace(sitefile=str(site)),
+        cloudmode=True,
+        fleetapi=False,
+        mode="cloud",
+        is_connected=lambda: True,
+    )
+    gm_module = sys.modules["app.core.gateway_manager"]
+    monkeypatch.setattr(
+        gm_module.pypowerwall, "Powerwall", lambda **kwargs: cloud
+    )
+    for name, value in {
+        "mqtt_controls": 0,
+        "mqtt_host": None,
+        "mqtt_username": None,
+        "mqtt_password": None,
+        "control_secret": None,
+        "siteid": None,
+        "cloud_read_fallback": True,
+        "failover": True,
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    config = GatewayConfig(
+        id="v1r",
+        name="v1r",
+        host="10.0.0.2",
+        email="user@example.com",
+        authpath=str(tmp_path),
+    )
+    await gm._init_cloud_control([config])
+    assert gm._cloud_control is cloud
+    assert gm._cloud_control_gateway_id == "v1r"
+
+
+@pytest.mark.asyncio
 async def test_cloud_read_flag_starts_cloud_without_control_secret(monkeypatch):
     from app.config import GatewayConfig, settings
     from unittest.mock import AsyncMock
