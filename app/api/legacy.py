@@ -445,6 +445,12 @@ async def control_islanding(
     gateway_id = get_default_gateway()
     method = "go_off_grid" if value == "off_grid" else "reconnect_grid"
     kwargs = {"confirm": True} if value == "off_grid" else {}
+    if settings.local_first_wifi and gateway_manager._is_lan_failed(gateway_id):
+        preflight = await gateway_manager.wifi_v1r_preflight(gateway_id)
+        if preflight is False:
+            raise HTTPException(
+                status_code=503, detail="WiFi v1r unavailable for islanding"
+            )
     try:
         result = await gateway_manager.local_control(
             gateway_id, method, timeout=10.0, **kwargs
@@ -751,6 +757,15 @@ async def _control_json(path: str, data: dict):
         else:
             method, args = "schedule_max_backup", (value,)
         async with _max_backup_lock:
+            if settings.local_first_wifi and gateway_manager._is_lan_failed(
+                gateway_id
+            ):
+                preflight = await gateway_manager.wifi_v1r_preflight(gateway_id)
+                if preflight is False:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="WiFi v1r unavailable for max backup",
+                    )
             result = await gateway_manager.local_control(
                 gateway_id, method, *args, timeout=_max_backup_timeout()
             )
@@ -2767,6 +2782,8 @@ async def get_stats():
                 "name": gw.name,
                 "host": gw.host,
                 "online": status.online if status else False,
+                "data_source": status.data_source if status else None,
+                "local_online": status.local_online if status else None,
                 "last_error": status.error if status and status.error else None,
                 "last_updated": status.last_updated
                 if status and status.last_updated
@@ -2832,6 +2849,8 @@ async def get_stats():
         "PW_FAILOVER": settings.failover,
         "PW_CLOUD_HYBRID": settings.cloud_hybrid,
         "PW_LOCAL_FIRST": settings.local_first,
+        "PW_LOCAL_FIRST_WIFI": settings.local_first_wifi,
+        "PW_CLOUD_READ_FALLBACK": settings.cloud_read_fallback,
     }
 
     # Build connection health section
@@ -2898,6 +2917,7 @@ async def get_stats():
 
     # Add SolarOnly fallback mode state for each tracked gateway
     stats["fallback_mode"] = gateway_manager.get_all_fallback_states()
+    stats["cloud_read_fallback"] = gateway_manager.get_all_cloud_read_states()
 
     # Add default gateway info for backward compatibility
     if gateway_manager.gateways:
