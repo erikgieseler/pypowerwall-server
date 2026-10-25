@@ -80,6 +80,7 @@ async def test_cloud_fallback_triggers_on_third_local_failure(monkeypatch):
     assert status.data is not None
     assert gm._cloud_read_state["v1r"]["active"] is True
     assert gm._next_poll_time["v1r"] >= time.time() + 3
+    gm._schedule_mqtt_publish.assert_called_with("v1r")
 
 
 @pytest.mark.asyncio
@@ -162,6 +163,54 @@ async def test_cloud_fallback_requires_cloud_client_and_failover(monkeypatch):
     assert gm._cloud_read_fallback_allowed("v1r") is False
 
 
+class _FakeCloudPowerwall:
+    cloudmode = True
+    fleetapi = False
+    tedapi_mode = "Cloud"
+    tedapi = None
+
+    def poll(self, path):
+        if path == "/api/meters/aggregates":
+            return {
+                "solar": {"instant_power": 1000},
+                "site": {"instant_power": 0},
+                "battery": {"instant_power": 0},
+                "load": {"instant_power": 1000},
+            }
+        return None
+
+    def level(self):
+        return 50.0
+
+    def grid_status(self):
+        return "UP"
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
+@pytest.mark.asyncio
+async def test_cloud_fallback_uses_same_fields_as_cloud_mode(monkeypatch):
+    normal = _manager(monkeypatch)
+    normal.gateways["v1r"].cloud_mode = True
+    normal.gateways["v1r"].basic_lan = False
+    fallback = _manager(monkeypatch)
+    fallback.gateways["v1r"].cloud_mode = False
+    fallback.gateways["v1r"].basic_lan = True
+    fake = _FakeCloudPowerwall()
+
+    cloud_mode_data = await normal._fetch_gateway_data("v1r", fake)
+    fallback_data = await fallback._fetch_gateway_data(
+        "v1r", fake, cloud_fallback=True
+    )
+
+    left = cloud_mode_data.model_dump()
+    right = fallback_data.model_dump()
+    left.pop("timestamp", None)
+    right.pop("timestamp", None)
+    assert left == right
+
+
 @pytest.mark.asyncio
 async def test_health_reports_degraded_for_cloud_fallback(monkeypatch):
     import app.main as main
@@ -191,8 +240,47 @@ async def test_health_reports_degraded_for_cloud_fallback(monkeypatch):
     assert result["cloud_read_fallback"]["v1r"]["active"] is True
 
 
+@pytest.mark.asyncio
+async def test_cloud_read_flag_starts_cloud_without_control_secret(monkeypatch):
+    from app.config import GatewayConfig, settings
+    from unittest.mock import AsyncMock
+
+    gm = GatewayManager()
+    cfg = GatewayConfig(
+        id="v1r",
+        name="v1r",
+        host="10.0.0.2",
+        gw_pwd="pw",
+        rsa_key_path="key.pem",
+        wifi_host="192.168.91.1",
+        email="user@example.com",
+        authpath="/data",
+    )
+    monkeypatch.setattr(settings, "cloud_read_fallback", True)
+    monkeypatch.setattr(settings, "control_secret", None)
+    monkeypatch.setattr(settings, "cloud_hybrid", False)
+    monkeypatch.setattr(settings, "failover", True)
+    monkeypatch.setattr(settings, "tedapi_recovery", False)
+    monkeypatch.setattr(gm, "_poll_gateway_loop", AsyncMock())
+    monkeypatch.setattr(gm, "_init_cloud_control", AsyncMock())
+    try:
+        await gm.initialize([cfg], poll_interval=4)
+        assert gm._cloud_control_configured is True
+        assert gm._cloud_control_task is not None
+    finally:
+        await gm.shutdown()
+
+
 def test_cloud_read_fallback_defaults_off():
     assert settings.cloud_read_fallback is False
+
+
+def test_cloud_fallback_is_limited_to_bound_gateway(monkeypatch):
+    gm = _manager(monkeypatch)
+    gm.gateways["other"] = Gateway(id="other", name="other", host="10.0.0.3")
+    gm.cache["other"] = GatewayStatus(gateway=gm.gateways["other"], online=False)
+    assert gm._cloud_read_fallback_allowed("v1r") is True
+    assert gm._cloud_read_fallback_allowed("other") is False
 
 
 def test_cloud_read_state_snapshot_is_serializable(monkeypatch):
