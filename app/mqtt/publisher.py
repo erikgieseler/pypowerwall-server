@@ -1127,7 +1127,7 @@ class MqttPublisher:
                 if not _gateway_can_v1r_write(gateway_manager, gateway_id):
                     logger.warning(f"{label} rejected: no confirmed v1r transport")
                     return
-                if _settings.local_first_wifi and gateway_manager._is_lan_failed(
+                if _settings.wifi_v1r_fallback and gateway_manager._is_lan_failed(
                     gateway_id
                 ):
                     preflight = await gateway_manager.wifi_v1r_preflight(gateway_id)
@@ -1310,7 +1310,7 @@ def _gateway_can_v1r_write(gateway_manager, gateway_id: str) -> bool:
         return True
     from app.config import settings
 
-    if not settings.local_first_wifi or not settings.failover:
+    if not settings.wifi_v1r_fallback or not settings.failover:
         return False
     connection = gateway_manager.connections.get(gateway_id)
     tedapi = getattr(connection, "tedapi", None)

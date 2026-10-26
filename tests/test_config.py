@@ -29,12 +29,12 @@ def test_local_first_yes_no(monkeypatch):
     assert Settings().local_first is False
 
 
-def test_local_first_wifi_yes_no(monkeypatch):
-    """PW_LOCAL_FIRST_WIFI follows the PW_* yes/no convention."""
-    monkeypatch.setenv("PW_LOCAL_FIRST_WIFI", "yes")
-    assert Settings().local_first_wifi is True
-    monkeypatch.setenv("PW_LOCAL_FIRST_WIFI", "no")
-    assert Settings().local_first_wifi is False
+def test_wifi_v1r_fallback_yes_no(monkeypatch):
+    """PW_WIFI_V1R_FALLBACK follows the PW_* yes/no convention."""
+    monkeypatch.setenv("PW_WIFI_V1R_FALLBACK", "yes")
+    assert Settings().wifi_v1r_fallback is True
+    monkeypatch.setenv("PW_WIFI_V1R_FALLBACK", "no")
+    assert Settings().wifi_v1r_fallback is False
 
 
 def test_gateway_config_validation():

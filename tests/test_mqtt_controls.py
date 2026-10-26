@@ -430,13 +430,13 @@ async def test_local_first_no_cloud_retry_after_a_failed_local_write(
     assert "failed (value=30 via local v1r)" in caplog.text
 
 
-# --- PW_LOCAL_FIRST_WIFI (signed WiFi-v1r after LAN failover) -----------------
+# --- PW_WIFI_V1R_FALLBACK (signed WiFi-v1r after LAN failover) -----------------
 
 
 def bind_hybrid_wifi(monkeypatch, preflight=True):
     """Hybrid v1r gateway with the opt-in WiFi write transport configured."""
     monkeypatch.setattr(settings, "local_first", False)
-    monkeypatch.setattr(settings, "local_first_wifi", True)
+    monkeypatch.setattr(settings, "wifi_v1r_fallback", True)
     monkeypatch.setattr(settings, "failover", True)
     monkeypatch.setattr(gateway_manager, "_cloud_control_gateway_id", "v1r")
     conn = _connection(lan_failed=True)
@@ -452,7 +452,7 @@ def bind_hybrid_wifi(monkeypatch, preflight=True):
 
 
 @pytest.mark.asyncio
-async def test_local_first_wifi_mqtt_takes_write(env, gm, monkeypatch, caplog):
+async def test_wifi_v1r_fallback_mqtt_takes_write(env, gm, monkeypatch, caplog):
     bind_hybrid_wifi(monkeypatch)
     with caplog.at_level(logging.INFO, logger=LOGGER):
         await run_commands(cmd("v1r", "mode", {"value": "backup"}))
@@ -464,7 +464,7 @@ async def test_local_first_wifi_mqtt_takes_write(env, gm, monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-async def test_local_first_wifi_probe_false_falls_back_to_cloud(
+async def test_wifi_v1r_fallback_probe_false_falls_back_to_cloud(
     env, gm, monkeypatch, caplog
 ):
     bind_hybrid_wifi(monkeypatch, preflight=False)
@@ -476,7 +476,7 @@ async def test_local_first_wifi_probe_false_falls_back_to_cloud(
 
 
 @pytest.mark.asyncio
-async def test_local_first_wifi_islanding_probe_false_rejected(
+async def test_wifi_v1r_fallback_islanding_probe_false_rejected(
     env, gm, monkeypatch, caplog
 ):
     bind_hybrid_wifi(monkeypatch, preflight=False)
@@ -489,7 +489,7 @@ async def test_local_first_wifi_islanding_probe_false_rejected(
 
 
 @pytest.mark.asyncio
-async def test_local_first_wifi_islanding_probe_true_dispatches(
+async def test_wifi_v1r_fallback_islanding_probe_true_dispatches(
     env, gm, monkeypatch, caplog
 ):
     bind_hybrid_wifi(monkeypatch)

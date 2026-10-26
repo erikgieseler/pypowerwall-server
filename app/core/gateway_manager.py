@@ -533,17 +533,17 @@ class GatewayManager:
 
         from app.config import settings
 
-        if settings.local_first_wifi:
+        if settings.wifi_v1r_fallback:
             if not settings.failover:
                 logger.warning(
-                    "PW_LOCAL_FIRST_WIFI is ignored because PW_FAILOVER=no"
+                    "PW_WIFI_V1R_FALLBACK is ignored because PW_FAILOVER=no"
                 )
             if not any(
                 config.wifi_host and config.rsa_key_path
                 for config in gateway_configs
             ):
                 logger.warning(
-                    "PW_LOCAL_FIRST_WIFI is set but no gateway has both "
+                    "PW_WIFI_V1R_FALLBACK is set but no gateway has both "
                     "wifi_host and rsa_key_path; the flag has no effect"
                 )
 
@@ -2207,7 +2207,7 @@ class GatewayManager:
             tedapi_kwargs["rsa_key_path"] = config.rsa_key_path
         if config.wifi_host:
             tedapi_kwargs["wifi_host"] = config.wifi_host
-        if settings.local_first_wifi:
+        if settings.wifi_v1r_fallback:
             tedapi_kwargs["wifi_v1r_fallback"] = True
         return tedapi_kwargs
 
@@ -2909,7 +2909,7 @@ class GatewayManager:
         """
         from app.config import settings
 
-        if not settings.local_first_wifi or not settings.failover:
+        if not settings.wifi_v1r_fallback or not settings.failover:
             return None
         if not self._is_lan_failed(gateway_id):
             return None
@@ -2942,7 +2942,7 @@ class GatewayManager:
         verbatim.
 
         ``PW_LOCAL_FIRST=yes`` takes the LAN write while the LAN is up.
-        ``PW_LOCAL_FIRST_WIFI=yes`` additionally takes the signed WiFi-v1r
+        ``PW_WIFI_V1R_FALLBACK=yes`` additionally takes the signed WiFi-v1r
         write when the library's LAN failover is tripped and a read-only
         probe (``wifi_v1r_preflight``) succeeds. The two flags are
         independent; neither changes the LAN-up priority of the other. Any
@@ -2955,18 +2955,18 @@ class GatewayManager:
         mode, grid settings) converge on the same target state either way.
 
         Islanding and max backup are separate routes (they add their own
-        preflight when PW_LOCAL_FIRST_WIFI is on).
+        preflight when PW_WIFI_V1R_FALLBACK is on).
         """
         # Late import per repo convention (avoids circular dependency).
         from app.config import settings
 
-        if not settings.local_first and not settings.local_first_wifi:
+        if not settings.local_first and not settings.wifi_v1r_fallback:
             return None, None
         if self.connections.get(gateway_id) is None:
             return None, None
 
         if self._is_lan_failed(gateway_id):
-            if not settings.local_first_wifi:
+            if not settings.wifi_v1r_fallback:
                 # Historical #161 behavior: cloud is the LAN-down fallback.
                 return None, None
             preflight = await self.wifi_v1r_preflight(gateway_id)

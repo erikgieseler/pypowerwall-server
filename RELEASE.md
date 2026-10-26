@@ -14,7 +14,7 @@
   local-first control paths are unchanged. Responses are marked
   `data_source=cloud`, `local_online=false`, while `online` remains true so
   Home Assistant keeps the values. No behavior change without the flag.
-- **Signed WiFi-v1r transport (`PW_LOCAL_FIRST_WIFI`)** - opt-in (`no` by
+- **Signed WiFi-v1r transport (`PW_WIFI_V1R_FALLBACK`)** - opt-in (`no` by
   default) extension of `PW_LOCAL_FIRST`. When the library's v1r LAN failover
   is tripped, a gateway with `PW_WIFI_HOST` and an RSA key uses signed
   WiFi-v1r as its only leader transport: all v1r reads, reserve/mode/grid,

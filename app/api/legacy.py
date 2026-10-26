@@ -445,7 +445,7 @@ async def control_islanding(
     gateway_id = get_default_gateway()
     method = "go_off_grid" if value == "off_grid" else "reconnect_grid"
     kwargs = {"confirm": True} if value == "off_grid" else {}
-    if settings.local_first_wifi and gateway_manager._is_lan_failed(gateway_id):
+    if settings.wifi_v1r_fallback and gateway_manager._is_lan_failed(gateway_id):
         preflight = await gateway_manager.wifi_v1r_preflight(gateway_id)
         if preflight is False:
             raise HTTPException(
@@ -757,7 +757,7 @@ async def _control_json(path: str, data: dict):
         else:
             method, args = "schedule_max_backup", (value,)
         async with _max_backup_lock:
-            if settings.local_first_wifi and gateway_manager._is_lan_failed(
+            if settings.wifi_v1r_fallback and gateway_manager._is_lan_failed(
                 gateway_id
             ):
                 preflight = await gateway_manager.wifi_v1r_preflight(gateway_id)
@@ -2849,7 +2849,7 @@ async def get_stats():
         "PW_FAILOVER": settings.failover,
         "PW_CLOUD_HYBRID": settings.cloud_hybrid,
         "PW_LOCAL_FIRST": settings.local_first,
-        "PW_LOCAL_FIRST_WIFI": settings.local_first_wifi,
+        "PW_WIFI_V1R_FALLBACK": settings.wifi_v1r_fallback,
         "PW_CLOUD_READ_FALLBACK": settings.cloud_read_fallback,
     }
 

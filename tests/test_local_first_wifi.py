@@ -1,4 +1,4 @@
-"""Tests for PW_LOCAL_FIRST_WIFI (signed WiFi-v1r after LAN failover)."""
+"""Tests for PW_WIFI_V1R_FALLBACK (signed WiFi-v1r after LAN failover)."""
 import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, Mock
@@ -67,7 +67,7 @@ def gm(monkeypatch):
         gateway_manager, "wifi_v1r_preflight", AsyncMock(return_value=True)
     )
     monkeypatch.setattr(settings, "local_first", False)
-    monkeypatch.setattr(settings, "local_first_wifi", True)
+    monkeypatch.setattr(settings, "wifi_v1r_fallback", True)
     monkeypatch.setattr(settings, "failover", True)
     return gateway_manager
 
@@ -78,8 +78,8 @@ def control_client(monkeypatch):
     return TestClient(app)
 
 
-def test_local_first_wifi_defaults_to_off():
-    assert settings.local_first_wifi is False
+def test_wifi_v1r_fallback_defaults_to_off():
+    assert settings.wifi_v1r_fallback is False
 
 
 @pytest.mark.asyncio
@@ -135,7 +135,7 @@ async def test_wifi_branch_requires_connection(gm, monkeypatch):
 @pytest.mark.asyncio
 async def test_wifi_flag_off_keeps_161_lan_failed_behavior(gm, monkeypatch):
     monkeypatch.setattr(settings, "local_first", True)
-    monkeypatch.setattr(settings, "local_first_wifi", False)
+    monkeypatch.setattr(settings, "wifi_v1r_fallback", False)
     label, result = await gm.control_write("v1r", "set_reserve", 20, timeout=10.0)
     assert (label, result) == (None, None)
     gm.wifi_v1r_preflight.assert_not_awaited()
@@ -202,8 +202,8 @@ def test_http_max_backup_wifi_preflight_true_dispatches(control_client, gm):
     assert gm.local_control.await_args.args == ("v1r", "schedule_max_backup", 60)
 
 
-def test_stats_reports_local_first_wifi(control_client, gm):
-    assert control_client.get("/stats").json()["config"]["PW_LOCAL_FIRST_WIFI"] is True
+def test_stats_reports_wifi_v1r_fallback(control_client, gm):
+    assert control_client.get("/stats").json()["config"]["PW_WIFI_V1R_FALLBACK"] is True
 
 
 @pytest.mark.asyncio
@@ -224,9 +224,9 @@ async def test_wifi_v1r_preflight_direct(gm, monkeypatch):
 @pytest.mark.asyncio
 async def test_wifi_v1r_preflight_not_applicable(gm, monkeypatch):
     real = type(gm).wifi_v1r_preflight
-    monkeypatch.setattr(settings, "local_first_wifi", False)
+    monkeypatch.setattr(settings, "wifi_v1r_fallback", False)
     assert await real(gm, "v1r") is None
-    monkeypatch.setattr(settings, "local_first_wifi", True)
+    monkeypatch.setattr(settings, "wifi_v1r_fallback", True)
     monkeypatch.setattr(settings, "failover", False)
     assert await real(gm, "v1r") is None
     monkeypatch.setattr(settings, "failover", True)
@@ -245,13 +245,13 @@ def test_gateway_can_v1r_write_covers_wifi_transport(gm, monkeypatch):
     monkeypatch.setattr(publisher, "_gateway_is_v1r", lambda *args: False)
     assert publisher._gateway_can_v1r_write(gm, "v1r") is True
     assert publisher._write_path(gm, "v1r") == "local v1r"
-    monkeypatch.setattr(settings, "local_first_wifi", False)
+    monkeypatch.setattr(settings, "wifi_v1r_fallback", False)
     assert publisher._gateway_can_v1r_write(gm, "v1r") is False
     assert publisher._write_path(gm, "v1r") is None
 
 
 def test_local_connection_kwargs_passes_wifi_flag(monkeypatch):
-    monkeypatch.setattr(settings, "local_first_wifi", True)
+    monkeypatch.setattr(settings, "wifi_v1r_fallback", True)
     config = GatewayConfig(
         id="gw",
         name="GW",
@@ -262,6 +262,6 @@ def test_local_connection_kwargs_passes_wifi_flag(monkeypatch):
     )
     kwargs = gateway_manager._local_connection_kwargs(config)
     assert kwargs["wifi_v1r_fallback"] is True
-    monkeypatch.setattr(settings, "local_first_wifi", False)
+    monkeypatch.setattr(settings, "wifi_v1r_fallback", False)
     kwargs = gateway_manager._local_connection_kwargs(config)
     assert "wifi_v1r_fallback" not in kwargs
