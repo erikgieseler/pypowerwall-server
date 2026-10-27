@@ -21,6 +21,7 @@
 - Battery Dispatch availability follows the default gateway's live v1r
   connection through `/control/status`, including mixed multi-gateway setups,
   and refreshes as connections change.
+- **`PW_FLEETAPI_HTTP` setting** - `1.1` forces HTTP/1.1 for all Tesla FleetAPI requests (default: HTTP/2), an escape hatch for the intermittent HTTP/2 connection-reuse errors (`COMPRESSION_ERROR`, h2 state errors) seen on some sites. pypowerwall 0.22.1 reads it (jasonacox/pypowerwall#436). `/stats` reports it under `config`, as the proxy does.
 
 **Changed:**
 - **pypowerwall upgraded to 0.22.1** (from 0.21.0; `requirements.txt` pin and `pyproject.toml` minimum). Library changes that reach server users:

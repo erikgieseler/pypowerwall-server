@@ -2914,6 +2914,7 @@ async def get_stats():
         "PW_TEDAPI_RECOVERY": settings.tedapi_recovery,
         "PW_TEDAPI_PROBE_INTERVAL": settings.tedapi_probe_interval,
         "PW_FAILOVER": settings.failover,
+        "PW_FLEETAPI_HTTP": settings.fleetapi_http or None,
         "PW_CLOUD_HYBRID": settings.cloud_hybrid,
         "PW_LOCAL_FIRST": settings.local_first,
     }
