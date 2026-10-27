@@ -1577,22 +1577,44 @@ class GatewayManager:
         )
         return max(interval, 30.0) if fleetapi else interval
 
-    async def _maybe_cloud_read(self, gateway_id: str) -> bool:
-        """Read from cloud when fallback is due, independently of local backoff."""
+    async def _maybe_cloud_read(self, gateway_id: str) -> Optional[bool]:
+        """Read from cloud when fallback is due, independently of local backoff.
+
+        Returns ``True`` on success, ``False`` when a cloud read was attempted
+        and failed, and ``None`` when no attempt was due/applicable. The
+        distinction lets the caller keep a live cloud cache while waiting for
+        its next cadence, but stop reporting it online once a cloud read fails.
+        """
         if (
             self._consecutive_failures.get(gateway_id, 0)
             < self._CLOUD_READ_FALLBACK_THRESHOLD
         ):
-            return False
+            return None
         if not self._cloud_read_fallback_allowed(gateway_id):
-            return False
+            return None
         now = time.time()
         if now < self._next_cloud_read_time.get(gateway_id, 0):
-            return False
+            return None
         # Schedule before the await so a slow/failed cloud read cannot spin.
         self._next_cloud_read_time[gateway_id] = now + self._cloud_read_interval()
         data = await self._fetch_cloud_read(gateway_id)
         if data is None:
+            cached = self.cache.get(gateway_id)
+            if cached is not None and cached.data_source == "cloud":
+                gateway = self.gateways[gateway_id]
+                error = "Cloud read fallback unavailable"
+                gateway.online = False
+                gateway.last_error = error
+                self.cache[gateway_id] = GatewayStatus(
+                    gateway=gateway,
+                    data=cached.data,
+                    online=False,
+                    last_updated=cached.last_updated,
+                    error=error,
+                    data_source="cache",
+                    local_online=False,
+                )
+                self._schedule_mqtt_publish(gateway_id)
             return False
         self._apply_cloud_read(gateway_id, data)
         return True
@@ -1967,16 +1989,18 @@ class GatewayManager:
             self._next_poll_time[gateway_id] = now + backoff_seconds
 
             if failure_count >= self._CLOUD_READ_FALLBACK_THRESHOLD:
-                if await self._maybe_cloud_read(gateway_id):
+                cloud_result = await self._maybe_cloud_read(gateway_id)
+                if cloud_result is True:
                     return
-                cached = self.cache.get(gateway_id)
-                if cached is not None and cached.data_source == "cloud":
-                    logger.debug(
-                        "Local retry for %s failed; keeping cloud fallback cache "
-                        "until the next cloud read",
-                        gateway_id,
-                    )
-                    return
+                if cloud_result is None:
+                    cached = self.cache.get(gateway_id)
+                    if cached is not None and cached.data_source == "cloud":
+                        logger.debug(
+                            "Local retry for %s failed; keeping cloud fallback "
+                            "cache until the next cloud read",
+                            gateway_id,
+                        )
+                        return
 
             logger.debug(
                 f"Exponential backoff for {gateway_id}: failure #{failure_count}, waiting {backoff_seconds}s before retry"

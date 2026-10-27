@@ -441,6 +441,29 @@ async def test_failed_local_retry_keeps_cloud_cache_until_next_cloud_read(monkey
 
 
 @pytest.mark.asyncio
+async def test_cloud_failure_marks_cloud_cache_offline(monkeypatch):
+    gm = _manager(monkeypatch)
+    calls = []
+    _install_fetch(gm, cloud_data=_data(), calls=calls)
+    for _ in range(3):
+        gm._next_poll_time["v1r"] = 0
+        await gm._poll_gateway("v1r")
+    assert gm.cache["v1r"].data_source == "cloud"
+
+    _install_fetch(gm, cloud_data=None, calls=calls)
+    gm._next_poll_time["v1r"] = time.time() + 100
+    gm._next_cloud_read_time["v1r"] = 0
+    await gm._poll_gateway("v1r")
+
+    status = gm.cache["v1r"]
+    assert status.online is False
+    assert status.data_source == "cache"
+    assert status.data is not None
+    assert status.local_online is False
+    assert gm._cloud_read_state["v1r"]["failures"] == 1
+
+
+@pytest.mark.asyncio
 async def test_cloud_fallback_does_not_reuse_stale_local_mode(monkeypatch):
     gm = _manager(monkeypatch)
     gm._last_successful_data["v1r"] = PowerwallData(
