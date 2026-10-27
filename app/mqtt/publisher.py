@@ -35,6 +35,8 @@ Topic layout
     {prefix}/{gateway_id}/battery_raw     float  — raw SOE %
     {prefix}/{gateway_id}/solar           float  — W (positive = producing)
     {prefix}/{gateway_id}/grid            float  — W (positive = importing)
+    {prefix}/{gateway_id}/grid_voltage    float  — V (site CT average voltage)
+    {prefix}/{gateway_id}/grid_current    float  — A (TEDAPI: signed like grid power)
     {prefix}/{gateway_id}/home            float  — W
     {prefix}/{gateway_id}/powerwall       float  — W (positive = discharging)
     {prefix}/{gateway_id}/grid_status     str    — "UP" | "DOWN" | "unknown"
@@ -309,6 +311,7 @@ class MqttPublisher:
                 controls=controls_mask,
                 writable=writable,
                 is_v1r=is_v1r,
+                grid_metrics=_grid_metrics(status.data if status else None),
             )
             for topic, payload in payloads:
                 await self._safe_publish(topic, payload, retain=True, qos=settings.mqtt_qos)
@@ -373,6 +376,11 @@ class MqttPublisher:
                     gateway_id,
                     exc_info=True,
                 )
+        # Grid voltage/current availability (#177): computed once per poll
+        # and shared with discovery so the HA entities match the topics
+        # actually published (no unknown entities on gateways that lack
+        # the site CT-average fields).
+        grid_metrics = _grid_metrics(data)
         controls_state = self._control_announce_state(gateway_id)
         batteries = self._battery_blocks(
             gateway_id, data.system_status if data else None
@@ -382,6 +390,7 @@ class MqttPublisher:
             data.vitals if data else None,
             device_signals,
             batteries=batteries,
+            grid_metrics=grid_metrics,
         )
         announced = self._discovery_sent.get(gateway_id)
         last_controls = self._discovery_controls_state.get(gateway_id)
@@ -504,6 +513,28 @@ class MqttPublisher:
                         await self._safe_publish(
                             f"{prefix}/powerwall", f"{pw_power:.1f}", retain, qos
                         )
+
+                    # Grid voltage / current from the site CT averages —
+                    # grid health monitoring (#177).  On TEDAPI, pypowerwall
+                    # computes instant_average_current as grid power / voltage,
+                    # so it is signed like grid power (positive = importing).
+                    # The local API passes through the gateway's value.
+                    grid_voltage = _extract_energy(
+                        agg, "site", "instant_average_voltage"
+                    )
+                    grid_current = _extract_energy(
+                        agg, "site", "instant_average_current"
+                    )
+                    for topic_suffix, val in (
+                        ("grid_voltage", grid_voltage),
+                        ("grid_current", grid_current),
+                    ):
+                        if val is not None:
+                            await self._safe_publish(
+                                f"{prefix}/{topic_suffix}",
+                                f"{val:.2f}",
+                                retain, qos,
+                            )
 
                     # Full aggregates JSON (useful for Node-RED, InfluxDB, etc.)
                     await self._safe_publish(
@@ -756,6 +787,8 @@ class MqttPublisher:
                     "batteries": batteries,
                     "solar": solar if data.aggregates else None,
                     "grid": grid if data.aggregates else None,
+                    "grid_voltage": grid_voltage if data.aggregates else None,
+                    "grid_current": grid_current if data.aggregates else None,
                     "home": home if data.aggregates else None,
                     "powerwall": pw_power if data.aggregates else None,
                     "grid_status": data.grid_status,
@@ -1325,8 +1358,28 @@ def _extract_power(aggregates: dict, key: str) -> Optional[float]:
         return None
 
 
+def _grid_metrics(data) -> list:
+    """Grid health metrics the snapshot actually reports (#177).
+
+    Returns the subset of ["grid_voltage", "grid_current"] for which the
+    site CT-average fields are present, so HA discovery only announces
+    sensors whose state topics will be published.
+    """
+    metrics: list = []
+    if data and isinstance(data.aggregates, dict):
+        if _extract_energy(data.aggregates, "site", "instant_average_voltage") is not None:
+            metrics.append("grid_voltage")
+        if _extract_energy(data.aggregates, "site", "instant_average_current") is not None:
+            metrics.append("grid_current")
+    return metrics
+
+
 def _extract_energy(aggregates: Optional[dict], section: str, field: str) -> Optional[float]:
-    """Safely extract a lifetime energy accumulator (Wh) from aggregates."""
+    """Safely extract a numeric field from an aggregates section.
+
+    Used for lifetime energy accumulators (Wh) and instantaneous CT
+    readings (V/A) alike — both live at aggregates[section][field].
+    """
     try:
         val = aggregates[section][field]
     except (KeyError, TypeError):
