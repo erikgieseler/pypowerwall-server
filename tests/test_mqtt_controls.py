@@ -430,6 +430,79 @@ async def test_local_first_no_cloud_retry_after_a_failed_local_write(
     assert "failed (value=30 via local v1r)" in caplog.text
 
 
+# --- PW_WIFI_V1R_FALLBACK (signed WiFi-v1r after LAN failover) -----------------
+
+
+def bind_hybrid_wifi(monkeypatch, preflight=True):
+    """Hybrid v1r gateway with the opt-in WiFi write transport configured."""
+    monkeypatch.setattr(settings, "local_first", False)
+    monkeypatch.setattr(settings, "wifi_v1r_fallback", True)
+    monkeypatch.setattr(settings, "failover", True)
+    monkeypatch.setattr(gateway_manager, "_cloud_control_gateway_id", "v1r")
+    conn = _connection(lan_failed=True)
+    conn.tedapi.v1r = True
+    conn.tedapi.wifi_v1r_transport = object()
+    conn.wifi_v1r_ready = MagicMock(return_value=True)
+    monkeypatch.setattr(gateway_manager, "connections", {"v1r": conn})
+    monkeypatch.setattr(
+        gateway_manager,
+        "wifi_v1r_write_allowed",
+        AsyncMock(return_value=preflight),
+    )
+
+
+@pytest.mark.asyncio
+async def test_wifi_v1r_fallback_mqtt_takes_write(env, gm, monkeypatch, caplog):
+    bind_hybrid_wifi(monkeypatch)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        await run_commands(cmd("v1r", "mode", {"value": "backup"}))
+    assert calls(gm.local_control) == [
+        (("v1r", "set_mode", "backup"), {"timeout": 10.0})
+    ]
+    assert gm.cloud_control.await_count == 0
+    assert "applied (value='backup' via local v1r (wifi))" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wifi_v1r_fallback_probe_false_falls_back_to_cloud(
+    env, gm, monkeypatch, caplog
+):
+    bind_hybrid_wifi(monkeypatch, preflight=False)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        await run_commands(cmd("v1r", "mode", {"value": "backup"}))
+    assert gm.local_control.await_count == 0
+    assert calls(gm.cloud_control) == [(("set_mode", "backup"), {"timeout": 10.0})]
+    assert "applied (value='backup' via hybrid cloud)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wifi_v1r_fallback_islanding_probe_false_rejected(
+    env, gm, monkeypatch, caplog
+):
+    bind_hybrid_wifi(monkeypatch, preflight=False)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await run_commands(
+            cmd("v1r", "islanding", {"action": "off_grid", "confirm": True})
+        )
+    assert gm.local_control.await_count == 0
+    assert "WiFi v1r unavailable for islanding" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wifi_v1r_fallback_islanding_probe_true_dispatches(
+    env, gm, monkeypatch, caplog
+):
+    bind_hybrid_wifi(monkeypatch)
+    gm.local_control.return_value = {"result": 1}
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        await run_commands(
+            cmd("v1r", "islanding", {"action": "off_grid", "confirm": True})
+        )
+    assert gm.local_control.await_count == 1
+    assert gm.cloud_control.await_count == 0
+    assert "applied (action=off_grid via local v1r)" in caplog.text
+
+
 @pytest.mark.parametrize("control, value, ok", [
     ("reserve", 0, True), ("reserve", 100, True), ("reserve", 101, False),
     ("reserve", -1, False), ("reserve", True, False), ("reserve", "30", False),

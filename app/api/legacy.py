@@ -464,6 +464,10 @@ async def control_islanding(
     gateway_id = get_default_gateway()
     method = "go_off_grid" if value == "off_grid" else "reconnect_grid"
     kwargs = {"confirm": True} if value == "off_grid" else {}
+    if not await gateway_manager.wifi_v1r_write_allowed(gateway_id):
+        raise HTTPException(
+            status_code=503, detail="WiFi v1r unavailable for islanding"
+        )
     try:
         result = await gateway_manager.local_control(
             gateway_id, method, timeout=10.0, **kwargs
@@ -835,6 +839,11 @@ async def _control_json(path: str, data: dict):
         else:
             method, args = "schedule_max_backup", (value,)
         async with _max_backup_lock:
+            if not await gateway_manager.wifi_v1r_write_allowed(gateway_id):
+                raise HTTPException(
+                    status_code=503,
+                    detail="WiFi v1r unavailable for max backup",
+                )
             result = await gateway_manager.local_control(
                 gateway_id, method, *args, timeout=_max_backup_timeout()
             )
@@ -2917,6 +2926,7 @@ async def get_stats():
         "PW_FLEETAPI_HTTP": settings.fleetapi_http or None,
         "PW_CLOUD_HYBRID": settings.cloud_hybrid,
         "PW_LOCAL_FIRST": settings.local_first,
+        "PW_WIFI_V1R_FALLBACK": settings.wifi_v1r_fallback,
     }
 
     # Build connection health section

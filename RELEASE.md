@@ -2,6 +2,28 @@
 
 ## Version History
 
+### [Unreleased]
+
+**Added:**
+- **Signed WiFi-v1r transport (`PW_WIFI_V1R_FALLBACK`)** - opt-in (`no`
+  by default) extension of `PW_LOCAL_FIRST`. When the library's v1r LAN
+  failover is tripped, a gateway with `PW_WIFI_HOST` and an RSA key uses signed
+  WiFi-v1r as its only leader transport: all v1r reads, reserve/mode/grid,
+  max backup and islanding use it. There is no fallback to the legacy WiFi
+  TEDAPI path; a failed read follows the normal poll failure/backoff path.
+  Before a write, the server performs one read-only signed config read over the
+  WiFi bridge; a false write gate uses the historical write dispatch (cloud for
+  value controls, `503` for max backup/islanding), and an already dispatched
+  write stays final. If signed WiFi-v1r is unavailable, value controls still
+  use the historical cloud path; during a LAN outage Tesla may accept such a
+  write without applying it (#149), while max backup/islanding return `503`.
+  Requires pypowerwall 0.22.1 or newer. No behavior changes without the flag;
+  existing `PW_LOCAL_FIRST`/#161 paths are unchanged. Read-only validation and
+  reserve `0 -> 5 -> 0` were exercised on a Powerwall 2 over an ESP32 bridge,
+  including the signed WiFi route. Powerwall 3 cold-failover validation is
+  requested from Sam/Jason and is not claimed here. Max backup/islanding use the
+  same transport but were not separately exercised.
+
 ### [0.13.0] - 2026-10-26
 
 Local battery dispatch from the API and the Console, a FleetAPI HTTP/1.1
