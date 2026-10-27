@@ -2,6 +2,32 @@
 
 ## Version History
 
+### [0.13.0] - Upcoming
+
+**Added:**
+- Console **Battery Dispatch** panel for local v1r gateways: choose charge or
+  discharge, power in watts and a duration, then start a timed dispatch or
+  resume normal operation. Uses the shared control token, validates input,
+  prevents duplicate submissions and reports command acknowledgements. Discharge
+  requires confirmation that it can export despite the Grid Export setting and
+  drain below Backup Reserve, as observed on Powerwall 2. README/API.md record
+  the observed behavior and remaining validation gaps.
+- Authenticated `POST /control/dispatch` and `/control/resume`, accepting JSON
+  and proxy-compatible form fields, for timed local battery power control via
+  paired v1r RSA transport. Positive watts discharge, negative watts charge;
+  duration is 1-86400 seconds. Always uses the local connection and shares the
+  gateway write lock, including across timeouts. Requires pypowerwall 0.22.0
+  or later.
+- Battery Dispatch availability follows the default gateway's live v1r
+  connection through `/control/status`, including mixed multi-gateway setups,
+  and refreshes as connections change.
+
+**Changed:**
+- **pypowerwall upgraded to 0.22.1** (from 0.21.0; `requirements.txt` pin and `pyproject.toml` minimum). Library changes that reach server users:
+  - The battery dispatch methods the endpoints above use (jasonacox/pypowerwall#440).
+  - TEDAPI `/api/system_status` on Powerwall 2 fills `instantaneous_max_charge_power` and `instantaneous_max_discharge_power`, which were `0`, and `/vitals` `TEPOD--` blocks carry `POD_available_charge_power` and `POD_available_dischg_power` (jasonacox/pypowerwall#429).
+  - FleetAPI: concurrent identical requests share one in-flight request, and Tesla's 429 retry guidance opens a shared backoff window instead of a request storm (jasonacox/pypowerwall#436).
+
 ### [0.12.0] - 2026-10-19
 
 The server now answers the legacy proxy's API the way the proxy does, so a
