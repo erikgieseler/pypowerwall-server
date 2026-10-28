@@ -81,6 +81,8 @@ Environment Variables (Proxy Compatible):
         PW_CONTROL_SECRET    - Enable control commands (default: none/disabled)
         PW_ISLANDING_COOLDOWN - Seconds between islanding commands per gateway
                                (default: 30; 0 disables)
+        PW_BATTERY_DISPATCH  - Enable battery dispatch "yes"/"no" (default: "no");
+                               use at your own risk
         PW_LOCAL_FIRST       - Prefer local v1r writes "yes"/"no" (default: "no")
         PW_WIFI_V1R_FALLBACK  - Allow signed WiFi-v1r writes after the v1r LAN
                                failover is tripped "yes"/"no" (default: "no")
@@ -257,7 +259,7 @@ def _scalar_kind(annotation):
 
 
 # Server version
-SERVER_VERSION = "0.13.0"
+SERVER_VERSION = "0.13.1"
 
 # MQTT control bitmask values for MQTT_CONTROLS (bits only, no names).
 # Default 0 keeps MQTT monitoring-only, exactly as before controls existed.
@@ -408,6 +410,9 @@ class Settings(BaseSettings):
     islanding_cooldown: int = Field(
         default=30, alias="PW_ISLANDING_COOLDOWN"
     )  # Server-enforced seconds between islanding commands per gateway (0 disables)
+    battery_dispatch: bool = Field(
+        default=False, alias="PW_BATTERY_DISPATCH"
+    )  # Battery dispatch opt-in (also needs PW_CONTROL_SECRET)
     proxy_base_url: str = Field(default="/", alias="PROXY_BASE_URL")
     pw_rsa_key_path: Optional[str] = Field(
         default=None, alias="PW_RSA_KEY_PATH"

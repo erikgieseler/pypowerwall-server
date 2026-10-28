@@ -18,7 +18,7 @@ The **Energy** panel toggles between **Energy Summary** (current kW totals) and 
 
 <img alt="PyPowerwall Server Console - Trend" src="https://github.com/user-attachments/assets/3fac475e-aebd-46a8-8c2d-8c4d294b2360" />
 
-The **Control** panel allows you to manage the Powerwall's operation mode, reserve percentage, grid charging (with eligibility warnings) and grid export (with PTO confirmation). Requires setting the `PW_CONTROL_SECRET` environment variable.
+The **Control** panel allows you to manage the Powerwall's operation mode, reserve percentage, grid charging (with eligibility warnings) and grid export (with PTO confirmation). Requires setting the `PW_CONTROL_SECRET` environment variable. Battery dispatch is a separate opt-in (`PW_BATTERY_DISPATCH=yes`): **use at your own risk**, and read the [warning](#battery-dispatch-opt-in) first.
 
 <img alt="PyPowerwall Server Console - Control" src="https://github.com/user-attachments/assets/2f33dc25-8f9c-412c-893f-087d6ba9c57d" />
 
@@ -62,7 +62,7 @@ Not sure which mode to run? Pick the row that matches your setup — then follow
 | **Cloud** | No local network access to the system | `PW_EMAIL` + `PW_AUTH_PATH` (one-time `python -m pypowerwall setup`) | Standard cloud metrics | Yes |
 | **FleetAPI** | Remote access via Tesla's official Fleet API | `PW_AUTH_PATH` holding `.pypowerwall.fleetapi` (one-time `python -m pypowerwall setup -fleetapi`) with no `PW_HOST`, or a `PW_GATEWAYS` (or `gateways.yaml`) entry with `email` + `authpath` + `fleetapi: true` | Standard cloud metrics | Yes |
 
-Local v1r and Basic LAN modes can perform supported control operations when `PW_CONTROL_SECRET` is set. Without cloud credentials, `/control/reserve`, `/control/mode`, and `/control/grid_charging` use the gateway's local connection. With `PW_EMAIL` and `PW_AUTH_PATH` configured (hybrid mode), those operations use the cloud connection while monitoring remains local. Set `PW_LOCAL_FIRST=yes` to try a confirmed local v1r transport first while the LAN is up and a local connection exists; when nothing local can be attempted, the write runs through the normal dispatch as before (covers the LAN-up / internet-down case). `PW_WIFI_V1R_FALLBACK=yes` makes the signed WiFi-v1r transport the strict route after the library's LAN failover is tripped: all leader v1r reads, reserve/mode/grid, max backup and islanding use it, and there is no fallback to the legacy WiFi TEDAPI path. A read-only probe gates writes; a failed probe uses the historical dispatch for writes (cloud for value controls, `503` for max backup/islanding). A failed read produces no fresh data for that poll; the server's normal poll failure/backoff and cached-data behavior applies. There is no legacy WiFi retry. If signed WiFi-v1r is unavailable, value controls still use the historical cloud path; during a LAN outage Tesla may accept such a cloud write without applying it (see #149), while max backup/islanding return 503. Requires pypowerwall 0.22.1 or newer. On some older Powerwall 3 firmware (26.10.4), the gateway stored local config writes without acting on them right away (jasonacox/pypowerwall#321); on 26.18.1 it acted within about 30–45 s. `POST /control/islanding` is different: it is available only in TEDAPI v1r mode, requires a registered RSA key, always uses the local gateway connection, and does not fall back to cloud control.
+Local v1r and Basic LAN modes can perform supported control operations when `PW_CONTROL_SECRET` is set. Without cloud credentials, `/control/reserve`, `/control/mode`, and `/control/grid_charging` use the gateway's local connection. With `PW_EMAIL` and `PW_AUTH_PATH` configured (hybrid mode), those operations use the cloud connection while monitoring remains local. Set `PW_LOCAL_FIRST=yes` to try a confirmed local v1r transport first while the LAN is up and a local connection exists; when nothing local can be attempted, the write runs through the normal dispatch as before (covers the LAN-up / internet-down case). `PW_WIFI_V1R_FALLBACK=yes` makes the signed WiFi-v1r transport the strict route after the library's LAN failover is tripped: all leader v1r reads, reserve/mode/grid, max backup and islanding use it, and there is no fallback to the legacy WiFi TEDAPI path. A read-only probe gates writes; a failed probe uses the historical dispatch for writes (cloud for value controls, `503` for max backup/islanding). A failed read produces no fresh data for that poll; the server's normal poll failure/backoff and cached-data behavior applies. There is no legacy WiFi retry. If signed WiFi-v1r is unavailable, value controls still use the historical cloud path; during a LAN outage Tesla may accept such a cloud write without applying it (see #149), while max backup/islanding return 503. Requires pypowerwall 0.22.2 or newer. On some older Powerwall 3 firmware (26.10.4), the gateway stored local config writes without acting on them right away (jasonacox/pypowerwall#321); on 26.18.1 it acted within about 30–45 s. `POST /control/islanding` is different: it is available only in TEDAPI v1r mode, requires a registered RSA key, always uses the local gateway connection, and does not fall back to cloud control.
 
 #### TEDAPI Mode (Local Access)
 ```bash
@@ -846,26 +846,51 @@ call, plus separate `POST /control/grid_charging {"value": true/false}` and
 `POST /control/grid_export {"value": "battery_ok"|"pv_only"|"never"}` calls when
 grid charging or export changed. Controls the default gateway.
 
-**Battery Dispatch** appears in the Control card when the default gateway uses
-local v1r. Choose **Charge** or **Discharge**, enter power in watts and a duration
-from 1 to 86400 whole seconds, then select **Start dispatch**. Defaults are
-500 W for 30 seconds. **Resume normal operation** releases a dispatch early;
-these actions are independent of Save. Starting a discharge opens a confirmation
-warning that it can export to the grid and drain below the backup reserve.
-Zero watts requests no battery power. Both actions use the same control token,
-disable while confirmation or a request is pending, and report whether the
-request was acknowledged. Check the power flow for actual power. The gateway
-returns to its configured mode when the duration ends. Requires pypowerwall
-0.22.0 or later.
+#### Battery Dispatch (opt-in)
 
-> **Warning:** A discharge can override the backup reserve and grid-export
-> setting, export electricity to the grid, and drain below the backup reserve.
-> On Powerwall 2 with Backup Gateway 1 (firmware 26.34.0), discharge ran with
-> reserve at 100% and export set to `pv_only` or `never`, exported the excess,
-> and raised `BackfeedLimited` and `BatteryUnexpectedPower` alerts. Do not rely
-> on those settings to prevent export or protect backup energy during dispatch.
-> The Console asks for confirmation before a discharge; API clients must account
-> for this behavior themselves.
+> **⚠️ WARNING: USE AT YOUR OWN RISK**
+>
+> Battery dispatch takes direct control of your Powerwall's battery through an
+> undocumented Tesla command. It is meant only for people who know what they
+> are doing.
+>
+> - A **discharge** overrides the backup reserve and the grid export setting.
+>   It can drain the battery below your reserve, leaving you **without backup
+>   power** if the grid goes down, and it can **export to the grid** even with
+>   export set to `pv_only` or `never`, which may conflict with your utility
+>   agreement.
+> - A **charge** can draw power from the grid at your current rate, and may
+>   ignore the grid charging setting (not yet verified).
+> - Behavior during a grid outage, and on firmware we haven't tested, is
+>   unknown, and any Tesla firmware update could change it.
+>
+> **We have no idea whether incorrect use could damage your home, your
+> Powerwall system or the grid.** This software is provided "as is", without
+> warranty of any kind (see the [MIT license](LICENSE)), and is not made or
+> supported by Tesla. Battery dispatch is off unless you set
+> `PW_BATTERY_DISPATCH=yes`. **By setting it, you accept these risks and full
+> responsibility for the results.**
+
+**Battery Dispatch** appears in the Control card only when you set
+`PW_BATTERY_DISPATCH=yes` (with `PW_CONTROL_SECRET`) and the default gateway
+uses local v1r. Without the opt-in the panel stays hidden and
+`POST /control/dispatch` returns 403. Choose **Charge** or **Discharge**, enter
+power in watts and a duration from 1 to 14400 whole seconds (4 hours; the API
+allows up to 86400), then select **Start dispatch**. Defaults are 500 W for 30
+seconds. Every dispatch, including 0 W, opens a confirmation with its risks, and
+the result shows its estimated end time. **Resume normal
+operation** releases a dispatch early, and `POST /control/resume` works even
+without the opt-in, so turning it off never strands a running dispatch. These
+actions are independent of Save and use the same control token. Check the power
+flow for actual power. The gateway returns to its configured mode when the
+duration ends.
+
+On Powerwall 2 with Backup Gateway 1 (firmware 26.34.0), a discharge ran with
+the reserve at 100% and export set to `pv_only` or `never`, exported the excess,
+and raised `BackfeedLimited` and `BatteryUnexpectedPower` alerts. Don't rely on
+those settings to prevent export or protect backup energy during a dispatch. The
+Console asks for confirmation before every dispatch; API clients must account
+for this behavior themselves.
 
 Observed on Powerwall 3 (firmware 26.26.4, v1r LAN, export `battery_ok`):
 discharge beyond the home load exports to the grid, `0` W holds the battery

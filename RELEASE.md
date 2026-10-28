@@ -17,12 +17,45 @@
   write stays final. If signed WiFi-v1r is unavailable, value controls still
   use the historical cloud path; during a LAN outage Tesla may accept such a
   write without applying it (#149), while max backup/islanding return `503`.
-  Requires pypowerwall 0.22.1 or newer. No behavior changes without the flag;
+  Requires pypowerwall 0.22.2 or newer. No behavior changes without the flag;
   existing `PW_LOCAL_FIRST`/#161 paths are unchanged. Read-only validation and
   reserve `0 -> 5 -> 0` were exercised on a Powerwall 2 over an ESP32 bridge,
-  including the signed WiFi route. Powerwall 3 cold-failover validation is
-  requested from Sam/Jason and is not claimed here. Max backup/islanding use the
+  including the signed WiFi route. Powerwall 3 cold-failover read-only validation was
+  run by @jasonacox-sam. Max backup/islanding use the
   same transport but were not separately exercised.
+
+### [0.13.1] - 2026-10-27
+
+Battery dispatch becomes a separate opt-in, with a clear "use at your own risk"
+warning, plus pypowerwall 0.22.2. Read **Changed** if you use battery dispatch.
+
+**Changed:**
+- **Battery dispatch is now opt-in: `PW_BATTERY_DISPATCH=yes`.** This is a
+  behavior change from 0.13.0. With only `PW_CONTROL_SECRET` set, the Console's
+  Battery Dispatch panel is hidden and `POST /control/dispatch` returns 403.
+  Set `PW_BATTERY_DISPATCH=yes` to turn it back on, **at your own risk**: a
+  dispatch overrides the backup reserve and grid export settings, and we have
+  no idea whether incorrect use could damage your home, your Powerwall system
+  or the grid. `POST /control/resume` works without it, so turning it off never
+  strands a running dispatch. The server logs a warning at startup when it's
+  on, and `/stats` reports it under `config`. (#185)
+- **pypowerwall upgraded to 0.22.2** (from 0.22.1; `requirements.txt` pin and
+  `pyproject.toml` minimum). Each accepted battery dispatch is now logged at
+  WARNING (action, watts, duration), and the library documents dispatch as use
+  at your own risk (jasonacox/pypowerwall#446).
+
+**Added:**
+- **Battery dispatch safeguards in the Console.** Every dispatch (charge,
+  discharge or 0 W) asks for confirmation, showing its risks, and the result
+  says when it is expected to end. Console durations are capped at 4 hours
+  (the API still accepts up to 86400 seconds). The panel shows one caution
+  line, with the full risks behind an info icon. (#185)
+- **"Use at your own risk" warning** for battery dispatch in README and API.md. (#185)
+
+**Fixed:**
+- **Battery dispatch success needs the gateway's acknowledgement for that
+  command** (matching power and duration, or `resume_battery_operation:
+  true`). Any other non-error reply was reported as success. (#185)
 
 ### [0.13.0] - 2026-10-26
 
