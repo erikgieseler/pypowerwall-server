@@ -2720,7 +2720,7 @@ class GatewayManager:
         probe = getattr(pw, "wifi_v1r_ready", None)
         if not callable(probe) or getattr(tedapi, "wifi_v1r_transport", None) is None:
             return False
-        timeout = min(max(5.0, settings.timeout + 2.0), 10.0)
+        timeout = max(5.0, settings.timeout + 2.0)
         try:
             loop = asyncio.get_running_loop()
             return bool(

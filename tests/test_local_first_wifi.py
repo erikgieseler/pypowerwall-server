@@ -1,4 +1,5 @@
 """Tests for PW_WIFI_V1R_FALLBACK (signed WiFi-v1r after LAN failover)."""
+import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, Mock
@@ -209,6 +210,27 @@ async def test_wifi_v1r_write_allowed_direct(gm, monkeypatch):
         assert await real(gm, "v1r") is False
         gm.connections["v1r"].tedapi.lan_failed = False
         assert await real(gm, "v1r") is True
+    finally:
+        executor.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_wifi_probe_uses_configured_timeout(gm, monkeypatch):
+    executor = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(gm, "_executor", executor)
+    monkeypatch.setattr(settings, "timeout", 30)
+    seen = {}
+    real_wait_for = asyncio.wait_for
+
+    async def capture(awaitable, timeout):
+        seen["timeout"] = timeout
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", capture)
+    real = type(gm).wifi_v1r_write_allowed
+    try:
+        assert await real(gm, "v1r") is True
+        assert seen["timeout"] == 32.0
     finally:
         executor.shutdown(wait=True)
 
