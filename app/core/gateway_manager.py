@@ -1523,7 +1523,7 @@ class GatewayManager:
         if not settings.cloud_read_fallback or not settings.failover:
             return False
         gateway = self.gateways.get(gateway_id)
-        if gateway is None or gateway.cloud_mode or gateway.fleetapi:
+        if gateway is None or gateway.cloud_mode or not gateway.host:
             return False
         cloud = self._cloud_control
         if cloud is None or self._cloud_control_gateway_id != gateway_id:
@@ -1607,7 +1607,6 @@ class GatewayManager:
                 gateway.last_error = error
                 self.cache[gateway_id] = GatewayStatus(
                     gateway=gateway,
-                    data=cached.data,
                     online=False,
                     last_updated=cached.last_updated,
                     error=error,
@@ -1952,15 +1951,19 @@ class GatewayManager:
                         f"Exponential backoff reset for {gateway_id} after {previous_failures} failures"
                     )
 
-            self._clear_cloud_read_state(gateway_id)
-            cloud_native = bool(gateway.cloud_mode or gateway.fleetapi)
+            cloud_only = bool(gateway.cloud_mode or (gateway.fleetapi and not gateway.host))
+            live_cloud = data.connection_mode in ("Cloud", "FleetAPI")
+            # Library-internal failover to Cloud is not a local recovery:
+            # keep any active cloud-read fallback state until local data returns.
+            if not live_cloud:
+                self._clear_cloud_read_state(gateway_id)
             self.cache[gateway_id] = GatewayStatus(
                 gateway=gateway,
                 data=data,
                 online=True,
                 last_updated=data.timestamp,
-                data_source="cloud" if cloud_native else "local",
-                local_online=None if cloud_native else True,
+                data_source="cloud" if cloud_only or live_cloud else "local",
+                local_online=None if cloud_only else not live_cloud,
             )
 
             # Queue the sample for daily energy statistics (never raises or

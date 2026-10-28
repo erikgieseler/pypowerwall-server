@@ -458,9 +458,69 @@ async def test_cloud_failure_marks_cloud_cache_offline(monkeypatch):
     status = gm.cache["v1r"]
     assert status.online is False
     assert status.data_source == "cache"
-    assert status.data is not None
+    assert status.data is None
     assert status.local_online is False
     assert gm._cloud_read_state["v1r"]["failures"] == 1
+
+    # The public getter may serve last-known data only within the TTL.
+    within_ttl = gm.get_gateway("v1r")
+    assert within_ttl.online is False
+    assert within_ttl.data_source == "cache"
+    assert within_ttl.data is not None
+
+    # Once the TTL expires, the same offline status must not retain data.
+    gm._last_successful_data["v1r"].timestamp = time.time() - settings.cache_ttl - 1
+    expired = gm.get_gateway("v1r")
+    assert expired.online is False
+    assert expired.data is None
+
+    # Disabling graceful degradation must not expose stale data either.
+    monkeypatch.setattr(settings, "graceful_degradation", False)
+    assert gm.get_gateway("v1r").data is None
+
+
+def test_cloud_fallback_allows_local_gateway_with_fleetapi_hybrid(monkeypatch):
+    gm = _manager(monkeypatch)
+    gm.gateways["v1r"].cloud_mode = False
+    gm.gateways["v1r"].fleetapi = True
+    assert gm._cloud_read_fallback_allowed("v1r") is True
+
+    gm.gateways["v1r"].host = None
+    gm.gateways["v1r"].cloud_mode = True
+    assert gm._cloud_read_fallback_allowed("v1r") is False
+
+
+@pytest.mark.asyncio
+async def test_local_gateway_internal_cloud_failover_is_reported_as_cloud(monkeypatch):
+    gm = _manager(monkeypatch)
+    data = _data()
+    data.connection_mode = "Cloud"
+    _install_fetch(gm, local_data=data, calls=[])
+    gm._next_poll_time["v1r"] = 0
+
+    await gm._poll_gateway("v1r")
+
+    status = gm.cache["v1r"]
+    assert status.online is True
+    assert status.data_source == "cloud"
+    assert status.local_online is False
+
+
+@pytest.mark.asyncio
+async def test_internal_cloud_failover_does_not_clear_fallback_state(monkeypatch):
+    gm = _manager(monkeypatch)
+    gm._cloud_read_state["v1r"] = gm._new_cloud_read_state()
+    gm._cloud_read_state["v1r"]["active"] = True
+    data = _data()
+    data.connection_mode = "Cloud"
+    _install_fetch(gm, local_data=data, calls=[])
+    gm._next_poll_time["v1r"] = 0
+
+    await gm._poll_gateway("v1r")
+
+    assert "v1r" in gm._cloud_read_state
+    assert gm.cache["v1r"].data_source == "cloud"
+    assert gm.cache["v1r"].local_online is False
 
 
 @pytest.mark.asyncio
