@@ -18,7 +18,7 @@ The **Energy** panel toggles between **Energy Summary** (current kW totals) and 
 
 <img alt="PyPowerwall Server Console - Trend" src="https://github.com/user-attachments/assets/3fac475e-aebd-46a8-8c2d-8c4d294b2360" />
 
-The **Control** panel allows you to manage the Powerwall's operation mode, reserve percentage, grid charging (with eligibility warnings) and grid export (with PTO confirmation). Requires setting the `PW_CONTROL_SECRET` environment variable. Battery dispatch is a separate opt-in (`PW_BATTERY_DISPATCH=yes`): **use at your own risk**, and read the [warning](#battery-dispatch-opt-in) first.
+The **Control** panel allows you to manage the Powerwall's operation mode, reserve percentage, grid charging (with eligibility warnings) and grid export (with PTO confirmation). Requires setting the `PW_CONTROL_SECRET` environment variable. Battery dispatch is a separate opt-in (`PW_BATTERY_DISPATCH=yes`): **use at your own risk; it could void your warranty**. Read the [warning](#battery-dispatch-opt-in) first.
 
 <img alt="PyPowerwall Server Console - Control" src="https://github.com/user-attachments/assets/2f33dc25-8f9c-412c-893f-087d6ba9c57d" />
 
@@ -483,6 +483,33 @@ gateways:
 - `rsa_key_path`: RSA-4096 private key PEM path for TEDAPI v1r LAN authentication (requires `gw_pwd` — see above)
 - `wifi_host`: the gateway's WiFi access point for TEDAPI v1r (normally `192.168.91.1`, or the address that forwards to it, e.g. behind a travel router; not set by default). Follower Powerwalls are queried over it
 
+### HTTPS (optional)
+
+Set `PW_HTTPS=yes` to also serve HTTPS on port **8775** (`PW_HTTPS_PORT`). HTTP
+on 8675 keeps working, so Powerwall-Dashboard, Home Assistant, scripts and
+health checks need no changes.
+
+```bash
+docker run -d -p 8675:8675 -p 8775:8775 -e PW_HTTPS=yes ... jasonacox/pypowerwall-server
+```
+
+Then open `https://<server>:8775/console`. By default the server generates a
+self-signed certificate once, unique to this install, and keeps it in
+`/data/tls`. Mount `/data` so it survives container updates, or the browser asks
+again. Browsers warn about a self-signed certificate until you accept or trust
+it. To use your own certificate (for example from your home CA or Let's
+Encrypt), set `PW_HTTPS_CERT` and `PW_HTTPS_KEY` to the paths of its PEM
+certificate and unencrypted key files. Over HTTPS the power-flow page's cookies are
+`SameSite=None; Secure`, so it works inside an HTTPS iframe such as a Home
+Assistant dashboard.
+
+HTTPS uses `PW_PORT` and `PW_BIND_ADDRESS`, not uvicorn's own options. If you
+start uvicorn yourself with `--port` or `--host`, set `PW_PORT` and
+`PW_BIND_ADDRESS` to match, so the listeners can't collide and a loopback-only
+setup stays loopback-only (the Docker image and the `pypowerwall-server` command
+already match). For access from outside your network, a reverse proxy with a
+real certificate (below) is still the better choice.
+
 ### Reverse Proxy / HTTPS Proxy
 
 You can serve pypowerwall-server from a sub-path alongside other services (e.g. Grafana on `/`) using `PROXY_BASE_URL`. This is the recommended setup for HTTPS via nginx.
@@ -848,11 +875,17 @@ grid charging or export changed. Controls the default gateway.
 
 #### Battery Dispatch (opt-in)
 
-> **⚠️ WARNING: USE AT YOUR OWN RISK**
+> **⚠️ WARNING: USE AT YOUR OWN RISK. IT COULD VOID YOUR WARRANTY.**
 >
 > Battery dispatch takes direct control of your Powerwall's battery through an
 > undocumented Tesla command. It is meant only for people who know what they
 > are doing.
+>
+> **Battery dispatch could void or limit your Tesla Powerwall warranty.** The
+> Powerwall warranty quoted in [pypowerwall#450](https://github.com/jasonacox/pypowerwall/issues/450) gives unlimited
+> cycles only for solar self-consumption, time-based control and backup; any
+> other use is limited to 37.8 MWh of total energy throughput. Check your
+> warranty first.
 >
 > - A **discharge** overrides the backup reserve and the grid export setting.
 >   It can drain the battery below your reserve, leaving you **without backup
