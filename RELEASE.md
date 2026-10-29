@@ -10,11 +10,22 @@
   are unchanged. The server generates a self-signed certificate once, unique to
   this install, in `/data/tls` (else `data/tls`), or uses `PW_HTTPS_CERT` /
   `PW_HTTPS_KEY`. Over HTTPS the power-flow cookies are `SameSite=None; Secure`
-  so the page works in an HTTPS iframe. `/stats` reports `PW_HTTPS_PORT`.
+  so the page works in an HTTPS iframe. `/stats` reports `PW_HTTPS_PORT`. (#188)
+
+**Changed:**
+- **Battery dispatch now boldly warns that it could void or limit your Tesla
+  Powerwall warranty.** The Powerwall warranty quoted in
+  [pypowerwall#450](https://github.com/jasonacox/pypowerwall/issues/450) gives
+  unlimited cycles only for solar self-consumption, time-based control and
+  backup; any other use is limited to 37.8 MWh of total energy throughput.
+  Added to the README and API.md warnings, the Console caution line, info popup
+  and confirmations, the 403 message and the startup warning. Thanks
+  @longzheng for spotting this and @BJReplay for working out what the limit
+  means in daily use. (#190)
 
 **Fixed:**
 - **`PW_HTTPS` did nothing.** The server accepted it and reported it in `/stats`
-  but always served plain HTTP; `PW_HTTPS=yes` now starts the HTTPS listener.
+  but always served plain HTTP; `PW_HTTPS=yes` now starts the HTTPS listener. (#188)
 
 ### [0.13.1] - 2026-10-27
 
