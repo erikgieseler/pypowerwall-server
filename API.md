@@ -103,6 +103,10 @@ PW_GATEWAYS='[
 |----------|---------|:-----:|-------------|
 | `PW_BIND_ADDRESS` | `0.0.0.0` | ✓ | Address to listen on. Also `server.host` in the config file. |
 | `PW_PORT` | `8675` | ✓ | Port to listen on. Also `server.port` in the config file. |
+| `PW_HTTPS` | `no` | ✓ | `yes` also serves HTTPS on `PW_HTTPS_PORT`; HTTP on `PW_PORT` keeps working for existing clients and health checks. Unlike the proxy (which switches its one port to HTTPS), the server adds a second port. The proxy's `http` reads as `no`: cookies follow each request's scheme. See [HTTPS](README.md#https-optional). |
+| `PW_HTTPS_PORT` | `8775` | | HTTPS port when `PW_HTTPS=yes`. Not 8676, which Powerwall-Dashboard's weather service uses. |
+| `PW_HTTPS_CERT` | none | | Path to a PEM certificate file for HTTPS, with `PW_HTTPS_KEY` (both or neither). Without them the server generates a self-signed certificate once, unique to this install, in `/data/tls` (else `data/tls`), and reuses it. |
+| `PW_HTTPS_KEY` | none | | Path to the PEM private key file for `PW_HTTPS_CERT` (unencrypted). |
 
 `PW_BIND_ADDRESS` and `PW_PORT` apply when the server is started with the
 `pypowerwall-server` command. The Docker image starts uvicorn directly on
@@ -136,7 +140,7 @@ PW_GATEWAYS='[
 |----------|---------|------------|:-----:|-------------|
 | `PW_CONTROL_SECRET` | none | All | ✓ | Enables all write routes; clients send it as the control token (see [Control and security](#control-and-security)). Unset means read-only. The proxy's form-encoded `token` requests work too. |
 | `PW_ISLANDING_COOLDOWN` | `30` | v1r | | Minimum seconds between islanding commands per gateway; `0` disables the cooldown. |
-| `PW_BATTERY_DISPATCH` | `no` | v1r | | `yes` enables timed battery dispatch (`POST /control/dispatch` and the Console panel). Needs `PW_CONTROL_SECRET`. **Use at your own risk: read the [warning](#timed-battery-dispatch-post-controldispatch-and-post-controlresume) first.** `POST /control/resume` works without it. |
+| `PW_BATTERY_DISPATCH` | `no` | v1r | | `yes` enables timed battery dispatch (`POST /control/dispatch` and the Console panel). Needs `PW_CONTROL_SECRET`. **Use at your own risk; it could void your warranty. Read the [warning](#timed-battery-dispatch-post-controldispatch-and-post-controlresume) first.** `POST /control/resume` works without it. |
 | `PW_CLOUD_HYBRID` | `no` | Local with `PW_EMAIL` | | `yes` starts the hybrid cloud connection without `PW_CONTROL_SECRET`, for its read-only values (Basic LAN mode and reserve, grid charging/export settings). With `PW_CONTROL_SECRET` set it starts anyway. Like the proxy, `PW_EMAIL` alone doesn't start it. |
 | `PW_CLOUD_READ_FALLBACK` | `no` | Local with Cloud/FleetAPI auth | | `yes` uses the bound Cloud/FleetAPI connection for the normal Cloud-Mode read set when the local poll fails three consecutive times. Requires `.pypowerwall.site`/`PW_SITEID` and internet; `PW_FAILOVER=no` disables it. Data is marked `data_source=cloud` and `local_online=false`; `online` remains true so HA keeps the values. `online=true` with cloud data does not mean the local gateway is reachable; check `data_source`/`local_online`. Cloud reads use the normal `PW_CACHE_EXPIRE` cadence (5 s default); FleetAPI uses a 30 s minimum. Local retries keep the exponential backoff (5, 10, 30, 60, then 120 s), and a cloud read does not reset it. |
 | `PW_LOCAL_FIRST` | `no` | v1r, Hybrid | | `yes` sends reserve, mode and grid writes over a confirmed local v1r connection first, even when a hybrid cloud connection exists (see [write path](#post-controlpath)). |
@@ -216,7 +220,7 @@ clients share the proxy's IP.
 
 These proxy variables are accepted (and some echoed in `/stats`) so an existing
 proxy environment starts cleanly, but they change nothing in the server:
-`PW_BROWSER_CACHE` (default `0`), `PW_HTTPS` (`no`; the proxy's `http` is accepted and reads as `no`, since the server always serves plain HTTP), `PW_AUTH_MODE` (`cookie`),
+`PW_BROWSER_CACHE` (default `0`), `PW_AUTH_MODE` (`cookie`),
 `PW_SUPPRESS_NETWORK_ERRORS` (`no`), `PW_NETWORK_ERROR_RATE_LIMIT` (`5`),
 `PW_FAIL_FAST` (`no`) and `PW_HEALTH_CHECK` (`yes`).
 
@@ -344,7 +348,7 @@ for the request format and write path.
 | GET | `/control/max_backup` | | Current backup events (TEDAPI v1r), as in the proxy, cached 30 seconds. With a valid token (the `Authorization` header, preferred, or `?token=`, which can end up in access logs), an expired manual backup event is cancelled, decided on fresh data. |
 | POST | `/control/{path}` | token | Set `reserve`, `mode`, `grid_charging`, `grid_export`, `reserve_hold` or `max_backup`; returns the library result. Also takes the proxy's form-encoded requests (below). |
 | POST | `/control/islanding` | token | Go off grid or reconnect (TEDAPI v1r only). |
-| POST | `/control/dispatch` | token | Timed local battery power setpoint (TEDAPI v1r only). Off unless `PW_BATTERY_DISPATCH=yes`; **use at your own risk**. |
+| POST | `/control/dispatch` | token | Timed local battery power setpoint (TEDAPI v1r only). Off unless `PW_BATTERY_DISPATCH=yes`; **use at your own risk; could void your warranty**. |
 | POST | `/control/resume` | token | Release a local battery dispatch. Works without `PW_BATTERY_DISPATCH`. |
 | GET | `/api/tesla/tariff_rate` | | The site's Tesla tariff from the cloud. Cached 5 minutes; the last good value is served if a refresh fails. |
 | POST | `/api/tesla/time_of_use_settings` | token | Update the Time-of-Use tariff. Body `{"tou_settings": {..., "tariff_content_v2": {...}}}`; only `tou_settings` is sent to Tesla. |
@@ -512,11 +516,17 @@ path above applies. With `PW_LOCAL_FIRST=yes` alone, islanding is unaffected.
 
 ### Timed battery dispatch: `POST /control/dispatch` and `POST /control/resume`
 
-> **⚠️ WARNING: USE AT YOUR OWN RISK**
+> **⚠️ WARNING: USE AT YOUR OWN RISK. IT COULD VOID YOUR WARRANTY.**
 >
 > Battery dispatch takes direct control of your Powerwall's battery through an
 > undocumented Tesla command. It is meant only for people who know what they
 > are doing.
+>
+> **Battery dispatch could void or limit your Tesla Powerwall warranty.** The
+> Powerwall warranty quoted in [pypowerwall#450](https://github.com/jasonacox/pypowerwall/issues/450) gives unlimited
+> cycles only for solar self-consumption, time-based control and backup; any
+> other use is limited to 37.8 MWh of total energy throughput. Check your
+> warranty first.
 >
 > - A **discharge** overrides the backup reserve and the grid export setting.
 >   It can drain the battery below your reserve, leaving you **without backup
