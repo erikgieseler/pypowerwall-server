@@ -19,7 +19,7 @@ from aiomqtt import Message
 from aiomqtt.client import MessagesIterator
 
 from app.config import settings
-from app.core.gateway_manager import gateway_manager
+from app.core.gateway_manager import IslandingCommandInProgressError, gateway_manager
 from app.models.gateway import Gateway, GatewayStatus, PowerwallData
 from app.mqtt.ha_discovery import build_discovery_payloads, control_config_topics
 from app.mqtt.publisher import CONTROL_COALESCE_WINDOW_S, MqttPublisher
@@ -486,6 +486,25 @@ async def test_wifi_v1r_fallback_islanding_probe_false_rejected(
         )
     assert gm.local_control.await_count == 0
     assert "WiFi v1r unavailable for islanding" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wifi_v1r_mqtt_islanding_checks_safety_before_probe(
+    env, gm, monkeypatch, caplog
+):
+    bind_hybrid_wifi(monkeypatch)
+    monkeypatch.setattr(
+        gateway_manager,
+        "check_islanding_safety",
+        MagicMock(side_effect=IslandingCommandInProgressError("still running")),
+    )
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        await run_commands(
+            cmd("v1r", "islanding", {"action": "off_grid", "confirm": True})
+        )
+    assert gm.local_control.await_count == 0
+    gateway_manager.wifi_v1r_write_allowed.assert_not_awaited()
+    assert "failed" in caplog.text
 
 
 @pytest.mark.asyncio

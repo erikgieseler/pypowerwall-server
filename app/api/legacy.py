@@ -480,11 +480,14 @@ async def control_islanding(
     gateway_id = get_default_gateway()
     method = "go_off_grid" if value == "off_grid" else "reconnect_grid"
     kwargs = {"confirm": True} if value == "off_grid" else {}
-    if not await gateway_manager.wifi_v1r_write_allowed(gateway_id):
-        raise HTTPException(
-            status_code=503, detail="WiFi v1r unavailable for islanding"
-        )
     try:
+        # Check the shared islanding safety state before awaiting the probe:
+        # an in-flight command may finish during the probe otherwise.
+        gateway_manager.check_islanding_safety(gateway_id)
+        if not await gateway_manager.wifi_v1r_write_allowed(gateway_id):
+            raise HTTPException(
+                status_code=503, detail="WiFi v1r unavailable for islanding"
+            )
         result = await gateway_manager.local_control(
             gateway_id, method, timeout=10.0, **kwargs
         )

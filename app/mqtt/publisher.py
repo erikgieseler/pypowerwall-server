@@ -1160,14 +1160,17 @@ class MqttPublisher:
                 if not _gateway_can_v1r_write(gateway_manager, gateway_id):
                     logger.warning(f"{label} rejected: no confirmed v1r transport")
                     return
-                if not await gateway_manager.wifi_v1r_write_allowed(gateway_id):
-                    logger.warning(
-                        f"{label} rejected: WiFi v1r unavailable for islanding"
-                    )
-                    return
                 method = "go_off_grid" if action == "off_grid" else "reconnect_grid"
                 kwargs = {"confirm": True} if action == "off_grid" else {}
                 try:
+                    # Check safety before awaiting the probe; local_control()
+                    # checks again immediately before dispatch.
+                    gateway_manager.check_islanding_safety(gateway_id)
+                    if not await gateway_manager.wifi_v1r_write_allowed(gateway_id):
+                        logger.warning(
+                            f"{label} rejected: WiFi v1r unavailable for islanding"
+                        )
+                        return
                     # Local v1r only, never the shared cloud connection, same
                     # 10 s timeout as HTTP, never retried
                     result = await gateway_manager.local_control(

@@ -2557,6 +2557,34 @@ class GatewayManager:
             self._cloud_failures += 1
             return None
 
+    def check_islanding_safety(self, gateway_id: str) -> None:
+        """Reject overlapping islanding commands and server-side cooldown hits.
+
+        Callers that perform an async preflight/probe before dispatch must run
+        this check before that await, then local_control() checks it again
+        immediately before dispatch.
+        """
+        # "In progress" means the dispatched future hasn't finished. Check
+        # done() rather than relying on the clear-on-completion callback below:
+        # asyncio runs done-callbacks on a later loop iteration, and on Python
+        # 3.13 local_control() returns before that has happened.
+        in_flight = self._islanding_futures.get(gateway_id)
+        if in_flight is not None and not in_flight.done():
+            raise IslandingCommandInProgressError(
+                "An islanding command is still in progress"
+            )
+        # Server-enforced cooldown between contactor commands.
+        from app.config import settings
+
+        cooldown = settings.islanding_cooldown
+        last_dispatch = self._islanding_last_dispatch.get(gateway_id)
+        if cooldown > 0 and last_dispatch is not None:
+            elapsed = time.monotonic() - last_dispatch
+            if elapsed < cooldown:
+                raise IslandingCooldownError(
+                    retry_after=max(1, math.ceil(cooldown - elapsed))
+                )
+
     async def local_control(
         self,
         gateway_id: str,
@@ -2582,27 +2610,7 @@ class GatewayManager:
             Result of the method call, or None on error/timeout
         """
         if method in _ISLANDING_METHODS:
-            # "In progress" means the dispatched future hasn't finished. Check
-            # done() rather than relying on the clear-on-completion callback
-            # below: asyncio runs done-callbacks on a later loop iteration, and
-            # on Python 3.13 local_control() returns before that has happened.
-            in_flight = self._islanding_futures.get(gateway_id)
-            if in_flight is not None and not in_flight.done():
-                raise IslandingCommandInProgressError(
-                    "An islanding command is still in progress"
-                )
-            # Server-enforced cooldown between contactor commands. Late
-            # import per repo convention (avoids circular dependency).
-            from app.config import settings
-
-            cooldown = settings.islanding_cooldown
-            last_dispatch = self._islanding_last_dispatch.get(gateway_id)
-            if cooldown > 0 and last_dispatch is not None:
-                elapsed = time.monotonic() - last_dispatch
-                if elapsed < cooldown:
-                    raise IslandingCooldownError(
-                        retry_after=max(1, math.ceil(cooldown - elapsed))
-                    )
+            self.check_islanding_safety(gateway_id)
 
         pw = self.connections.get(gateway_id)
         if not pw:

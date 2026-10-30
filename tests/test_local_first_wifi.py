@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import GatewayConfig, settings
-from app.core.gateway_manager import gateway_manager
+from app.core.gateway_manager import IslandingCommandInProgressError, gateway_manager
 from app.main import app
 from app.models.gateway import Gateway, GatewayStatus, PowerwallData
 
@@ -155,6 +155,22 @@ def test_http_islanding_write_gate_false_is_503(control_client, gm):
     )
     assert response.status_code == 503
     assert response.json()["detail"] == "WiFi v1r unavailable for islanding"
+    gm.local_control.assert_not_awaited()
+
+
+def test_http_islanding_checks_safety_before_probe(control_client, gm, monkeypatch):
+    monkeypatch.setattr(
+        gm,
+        "check_islanding_safety",
+        Mock(side_effect=IslandingCommandInProgressError("still running")),
+    )
+    response = control_client.post(
+        "/control/islanding",
+        json={"value": "off_grid", "confirm": True},
+        headers={"Authorization": _TOKEN},
+    )
+    assert response.status_code == 409
+    gm.wifi_v1r_write_allowed.assert_not_awaited()
     gm.local_control.assert_not_awaited()
 
 
