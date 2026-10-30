@@ -1490,7 +1490,8 @@ class GatewayManager:
 
         if cloud_fallback:
             # Match a normal Cloud-Mode poll: do not mix in the last local
-            # multi-Powerwall snapshot.
+            # multi-Powerwall snapshot, and do not inherit its vitals marker.
+            self._vitals_preserved.discard(gateway_id)
             return data
         # Guard against partial TEDAPI follower snapshots replacing a complete
         # multi-Powerwall view for a single poll cycle.
@@ -1682,11 +1683,8 @@ class GatewayManager:
             data_source="cloud",
             local_online=False,
         )
-        # Keep the local poll backoff intact: a cloud fallback read must not
-        # reset the gateway to PW_CACHE_EXPIRE (or hide a longer local backoff).
-        self._next_cloud_read_time[gateway_id] = (
-            time.time() + self._cloud_read_interval()
-        )
+        # Keep both deadlines intact: the start-based cloud deadline was set
+        # in _maybe_cloud_read(), and the local poll backoff must not reset.
         try:
             self._record_timeseries_sample(gateway_id, gateway, data)
             self._record_signal_sample(gateway_id, gateway, data)
@@ -2549,6 +2547,7 @@ class GatewayManager:
                 last_updated=last_success_data.timestamp,
                 error=status.error,
                 data_source="cache",
+                local_online=status.local_online,
             )
 
         # Cached data too old - return offline status with no data

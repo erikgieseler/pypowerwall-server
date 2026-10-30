@@ -1,4 +1,5 @@
 """Tests for the opt-in Cloud-Read-Fallback after local poll failures."""
+import asyncio
 import time
 from unittest.mock import Mock
 
@@ -467,6 +468,7 @@ async def test_cloud_failure_marks_cloud_cache_offline(monkeypatch):
     assert within_ttl.online is False
     assert within_ttl.data_source == "cache"
     assert within_ttl.data is not None
+    assert within_ttl.local_online is False
 
     # Once the TTL expires, the same offline status must not retain data.
     gm._last_successful_data["v1r"].timestamp = time.time() - settings.cache_ttl - 1
@@ -521,6 +523,35 @@ async def test_internal_cloud_failover_does_not_clear_fallback_state(monkeypatch
     assert "v1r" in gm._cloud_read_state
     assert gm.cache["v1r"].data_source == "cloud"
     assert gm.cache["v1r"].local_online is False
+
+
+@pytest.mark.asyncio
+async def test_cloud_fallback_clears_preserved_vitals_marker(monkeypatch):
+    gm = _manager(monkeypatch)
+    gm._vitals_preserved.add("v1r")
+    data = await gm._fetch_gateway_data(
+        "v1r", _FakeCloudPowerwall(), cloud_fallback=True
+    )
+    assert data.aggregates
+    assert "v1r" not in gm._vitals_preserved
+
+
+@pytest.mark.asyncio
+async def test_cloud_read_deadline_starts_before_fetch(monkeypatch):
+    gm = _manager(monkeypatch)
+    gm._poll_interval = 1
+    gm._consecutive_failures["v1r"] = 3
+    gm._next_cloud_read_time["v1r"] = 0
+
+    async def slow_fetch(gateway_id):
+        await asyncio.sleep(0.2)
+        return _data()
+
+    gm._fetch_cloud_read = slow_fetch
+    started = time.time()
+    assert await gm._maybe_cloud_read("v1r") is True
+    # Old code reset this after completion (started + 0.2 + 1).
+    assert gm._next_cloud_read_time["v1r"] <= started + 1.15
 
 
 @pytest.mark.asyncio
