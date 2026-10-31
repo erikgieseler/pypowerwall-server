@@ -1683,6 +1683,9 @@ class GatewayManager:
             data_source="cloud",
             local_online=False,
         )
+        # A successful read proves the shared cloud link is alive.
+        self._cloud_failures = 0
+        self._cloud_last_success = time.time()
         # Keep both deadlines intact: the start-based cloud deadline was set
         # in _maybe_cloud_read(), and the local poll backoff must not reset.
         try:
@@ -1999,6 +2002,15 @@ class GatewayManager:
                         logger.debug(
                             "Local retry for %s failed; keeping cloud fallback "
                             "cache until the next cloud read",
+                            gateway_id,
+                        )
+                        return
+                elif cloud_result is False:
+                    cached = self.cache.get(gateway_id)
+                    if cached is not None and cached.data_source == "cache":
+                        logger.debug(
+                            "Local retry and cloud refresh failed for %s; "
+                            "keeping offline cache snapshot",
                             gateway_id,
                         )
                         return

@@ -554,6 +554,40 @@ async def test_cloud_read_deadline_starts_before_fetch(monkeypatch):
     assert gm._next_cloud_read_time["v1r"] <= started + 1.15
 
 
+def test_successful_cloud_fallback_restores_shared_cloud_health(monkeypatch):
+    gm = _manager(monkeypatch)
+    gm._cloud_control_configured = True
+    gm._cloud_failures = 3
+    gm._cloud_last_success = None
+
+    gm._apply_cloud_read("v1r", _data())
+
+    assert gm._cloud_failures == 0
+    assert gm._cloud_last_success is not None
+
+
+@pytest.mark.asyncio
+async def test_local_and_cloud_failure_preserves_offline_snapshot(monkeypatch):
+    gm = _manager(monkeypatch)
+    calls = []
+    _install_fetch(gm, cloud_data=_data(), calls=calls)
+    for _ in range(3):
+        gm._next_poll_time["v1r"] = 0
+        await gm._poll_gateway("v1r")
+    assert gm.cache["v1r"].data_source == "cloud"
+
+    _install_fetch(gm, cloud_data=None, calls=calls)
+    gm._next_poll_time["v1r"] = 0
+    gm._next_cloud_read_time["v1r"] = 0
+    await gm._poll_gateway("v1r")
+
+    status = gm.cache["v1r"]
+    assert status.online is False
+    assert status.data_source == "cache"
+    assert status.local_online is False
+    assert status.data is None
+
+
 @pytest.mark.asyncio
 async def test_cloud_fallback_does_not_reuse_stale_local_mode(monkeypatch):
     gm = _manager(monkeypatch)
