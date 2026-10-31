@@ -2,7 +2,7 @@
 
 ## Version History
 
-### [Unreleased]
+### [0.15.0] - Upcoming
 
 **Added:**
 - **Cloud read fallback (`PW_CLOUD_READ_FALLBACK`)** - opt-in (`no` by
