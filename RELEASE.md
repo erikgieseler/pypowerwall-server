@@ -2,7 +2,7 @@
 
 ## Version History
 
-### [Unreleased]
+### [0.15.0] - Upcoming
 
 **Added:**
 - **Signed WiFi-v1r transport (`PW_WIFI_V1R_FALLBACK`)** - opt-in (`no`
